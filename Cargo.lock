@@ -24,12 +24,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitflags"
-version = "2.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34efbcccd345379ca2868b2b2c9d3782e9cc58ba87bc7d79d5b53d9c9ae6f25d"
-
-[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -40,7 +34,6 @@ name = "gameboy-emulator"
 version = "0.1.0"
 dependencies = [
  "bitfields",
- "bitflags",
  "pretty_assertions",
  "serde",
  "serde_json",

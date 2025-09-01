@@ -36,7 +36,7 @@ fn cpu_to_mock(emu: &mut emu::Emu, mock: &CpuTestState) -> CpuTestState {
     pc: cpu.pc,
     sp: cpu.sp,
     a: cpu.a,
-    f: cpu.f.bits(),
+    f: cpu.f.clone().into_bits(),
     b: cpu.bc.hi(),
     c: cpu.bc.lo(),
     d: cpu.de.hi(),
@@ -63,7 +63,7 @@ fn cpu_from_mock(emu: &mut emu::Emu, mock: &CpuTestState) {
   cpu.ime = mock.ime > 0;
   cpu.ei = mock.ei.unwrap_or_default() > 0;
   cpu.a = mock.a;
-  cpu.f = cpu::Flags::from_bits_retain(mock.f);
+  cpu.f = cpu::Flags::from_bits(mock.f);
   cpu.bc.set_hi(mock.b);
   cpu.bc.set_lo(mock.c);
   cpu.de.set_hi(mock.d);
@@ -120,7 +120,6 @@ fn exec_test() {
 
   assert_eq!(res, test[0].end);
 }
-
 
 #[test]
 fn exec_all_tests() {

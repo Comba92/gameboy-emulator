@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 bitfields = "1.0.0"
-bitflags = "2.9.3"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
