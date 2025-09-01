@@ -518,7 +518,7 @@ impl Emu {
 
 		self.set_z(res);
 		self.cpu.f.remove(Flags::N);
-		self.cpu.f.set(Flags::C, val.shr(carry) > 0);
+		self.cpu.f.set(Flags::C, val & (1 << carry) > 0);
 		self.cpu.f.remove(Flags::H);
 
 		set(self, res);
