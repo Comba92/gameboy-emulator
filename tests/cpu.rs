@@ -130,7 +130,7 @@ fn exec_all_tests() {
     let entry = file.unwrap();
 
     let name = entry.file_name().into_string().unwrap();
-    if name.starts_with("cb") || name.starts_with("10") || name.starts_with("76") { continue; }
+    if name.starts_with("10") || name.starts_with("76") { continue; }
 
     println!("{:?}", entry.file_name());
     let file = fs::File::open(entry.path()).unwrap();

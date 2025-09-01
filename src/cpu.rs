@@ -30,6 +30,7 @@ pub struct CpuSM83 {
 	pub ime: bool,
 	pub ei: bool,
 
+	halted: bool,
   pub mcycles: usize,
 }
 
@@ -304,7 +305,6 @@ impl Emu {
 			.wrapping_sub(val as u16)
 			.wrapping_sub(self.cpu.f.carry() as u16);
 
-		
 		self.set_z(res as u8);
 		self.cpu.f.set_neg(true);
 		self.cpu.f.set_hcarry(((self.cpu.a & 0xF).wrapping_sub(val & 0xF).wrapping_sub(self.cpu.f.carry() as u8)) & 0x10 > 0);
