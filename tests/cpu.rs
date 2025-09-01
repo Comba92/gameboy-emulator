@@ -121,6 +121,7 @@ fn exec_test() {
   assert_eq!(res, test[0].end);
 }
 
+
 #[test]
 fn exec_all_tests() {
   let files = fs::read_dir("./tests/sm83/v1/").expect("tests folder missing");

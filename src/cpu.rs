@@ -71,8 +71,7 @@ impl Emu {
 			self.cpu.ei = false;
 		}
 
-		let opcode = self.pc_fetch();
-		self.decode_n_execute(opcode);
+		self.decode_n_execute();
 	}
 
   pub fn read8(&mut self, addr: u16) -> u8 {
@@ -652,7 +651,9 @@ impl Emu {
 
 
 impl Emu {
-  fn decode_n_execute(&mut self, opcode: u8) {
+  fn decode_n_execute(&mut self) {
+		let opcode = self.pc_fetch();
+
 		match opcode {
 			0x00 => self.nop(),
 			0x01 => self.ld(Self::set_bc,Self::immediate16),
@@ -857,7 +858,7 @@ impl Emu {
 			0xC8 => self.retc(Self::z),
 			0xC9 => self.ret(),
 			0xCA => self.jpc(Self::z,Self::immediate16),
-			0xCB => self.decode_n_execute_cb(opcode),
+			0xCB => self.decode_n_execute_cb(),
 			0xCC => self.callc(Self::z,Self::immediate16),
 			0xCD => self.call(Self::immediate16),
 			0xCE => self.adc(Self::immediate8),
@@ -903,7 +904,9 @@ impl Emu {
     }
   }
 
-	fn decode_n_execute_cb(&mut self, opcode: u8) {
+	fn decode_n_execute_cb(&mut self) {
+		let opcode = self.pc_fetch();
+
 		match opcode {
 			0x00 => self.rlc(Self::set_b,Self::b),
 			0x01 => self.rlc(Self::set_c,Self::c),
