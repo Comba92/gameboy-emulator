@@ -1,7 +1,7 @@
 use crate::emu::CGBMode;
 
 #[derive(Debug, Default)]
-struct CartHeader {
+pub(crate) struct CartHeader {
   title: String,
   mapper: u8,
   rom_size: usize,
@@ -27,7 +27,7 @@ impl CartHeader {
       .to_string();
 
     header.cgb_mode = match bytes[0x143] {
-      0x80 => CGBMode::ColonEnhanced,
+      0x80 => CGBMode::ColorEnhanced,
       0xc0 => CGBMode::ColorOnly,
       _ => CGBMode::Monochrome
     };
@@ -48,10 +48,4 @@ impl CartHeader {
 
     Ok(header)
   }
-}
-
-#[test]
-fn parse_test() {
-  let header = CartHeader::parse(include_bytes!("../roms/Tetris (World) (Rev A).gb"));
-  println!("{header:?}");
 }

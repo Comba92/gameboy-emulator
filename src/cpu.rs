@@ -66,25 +66,69 @@ impl Emu {
 	}
 
 	pub fn cpu_step(&mut self) {
+		self.handle_interrupts();
 		if self.cpu.ei {
 			self.cpu.ime = true;
 			self.cpu.ei = false;
 		}
+		if self.cpu.halted {
+			self.tick();
+			return;
+		}
 
-		self.decode_n_execute();
+		let opcode = self.pc_fetch();
+		self.decode_n_execute(opcode);
 	}
 
-  pub fn read8(&mut self, addr: u16) -> u8 {
+	fn handle_interrupts(&mut self) -> bool {
+		let inte = self.inte.into_bits();
+		let intf = self.intf.into_bits();
+
+		if !self.cpu.ime {
+			// If IME is not set, there are two distinct cases, depending on whether an interrupt is pending as the halt instruction is first executed.
+			
+			// If no interrupt is pending, halt executes as normal, and the CPU resumes regular execution as soon as an interrupt becomes pending. However, since IME=0, the interrupt is not handled.
+			if inte & intf & 0x1f > 0 {
+				self.cpu.halted = false;
+			}
+
+			return false;
+		}
+
+		for bit in 0..5 {
+			let mask = 1 << bit;
+			if inte & intf & mask > 0 {
+				// Most commonly, IME is set. In this case, the CPU simply wakes up, and before executing the instruction after the halt, the interrupt handler is called normally.
+				self.cpu.halted = false;
+
+				self.cpu.ime = false;
+				self.intf.set_bits(intf & !mask);
+
+				// Two wait states are executed (2 M-cycles pass while nothing happens; presumably the CPU is executing nops during this time).
+				self.tick();
+				self.tick();
+
+				// we can easily get the ISR (0x40, 048, 0x50, 0x58, 0x60) like this
+				let isr = 0x40 | (bit << 3);
+				self.rst(isr);
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+  fn read8(&mut self, addr: u16) -> u8 {
 		self.tick();
-		self.ram[addr as usize]
+		self.dispatch_read(addr)
 	}
 	fn read16(&mut self, addr: u16) -> u16 {
 		u16::from_le_bytes([self.read8(addr), self.read8(addr.wrapping_add(1))])
 	}
 
-	pub fn write8(&mut self, addr: u16, val: u8) {
+	fn write8(&mut self, addr: u16, val: u8) {
 		self.tick();
-		self.ram[addr as usize] = val;
+		self.dispatch_write(addr, val);
 	}
 	fn write16(&mut self, addr: u16, val: u16){
 		let [lo, hi] = val.to_le_bytes();
@@ -645,15 +689,26 @@ impl Emu {
 	}
 
 	fn halt(&mut self) {
-		eprintln!("HALT!");
+		let inte = self.inte.into_bits();
+		let intf = self.intf.into_bits();
+
+		// If IME is not set, there are two distinct cases, depending on whether an interrupt is pending as the halt instruction is first executed.
+		if !self.cpu.ime && (inte & intf & 0x1f) > 0 {
+			// If an interrupt is pending, halt immediately exits, as expected, however the “halt bug” is triggered.
+			// https://gbdev.io/pandocs/halt.html#halt-bug
+
+			// read without increasing pc
+			let opcode = self.read8(self.cpu.pc);
+			self.decode_n_execute(opcode);
+		} else {
+			self.cpu.halted = true;
+		}
 	}
 }
 
 
 impl Emu {
-  fn decode_n_execute(&mut self) {
-		let opcode = self.pc_fetch();
-
+  fn decode_n_execute(&mut self, opcode: u8) {
 		match opcode {
 			0x00 => self.nop(),
 			0x01 => self.ld(Self::set_bc,Self::immediate16),
@@ -900,7 +955,7 @@ impl Emu {
 			0xFB => self.ei(),
 			0xFE => self.cp(Self::immediate8),
 			0xFF => self.rst(0x38),
-			_ => eprintln!("{:02X} not reachable", opcode)
+			_ => panic!("===[SYSTEM JAM]=== illegal opcode {:02X} reached", opcode)
     }
   }
 

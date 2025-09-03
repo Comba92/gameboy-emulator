@@ -27,7 +27,7 @@ struct CpuTestState {
 
 use std::{fs, io::{self, Read}};
 
-use gameboy_emulator::{emu, cpu};
+use gameboy_emulator::{cpu::{self, CpuSM83}, emu::{self, Emu}};
 
 fn cpu_to_mock(emu: &mut emu::Emu, mock: &CpuTestState) -> CpuTestState {
   let cpu = &emu.cpu;
@@ -49,7 +49,7 @@ fn cpu_to_mock(emu: &mut emu::Emu, mock: &CpuTestState) -> CpuTestState {
   };
 
   for (addr, _) in &mock.ram {
-    test.ram.push((*addr, emu.ram[*addr as usize]));
+    test.ram.push((*addr, emu.dispatch_read(*addr)));
   }
 
   test
@@ -72,7 +72,7 @@ fn cpu_from_mock(emu: &mut emu::Emu, mock: &CpuTestState) {
   cpu.hl.set_lo(mock.l);
 
   for (addr, val) in &mock.ram {
-    emu.ram[*addr as usize] = *val;
+    emu.dispatch_write(*addr, *val);
   }
 }
 
@@ -85,18 +85,23 @@ fn parse_test() {
   println!("{:?}", res[0]);
 }
 
-fn cpu_test(test: &CpuTest) -> bool {
-  let mut emu = emu::Emu::default();
-  cpu_from_mock(&mut emu, &test.start);
+fn cpu_test(emu: &mut emu::Emu, test: &CpuTest) -> bool {
+  cpu_from_mock(emu, &test.start);
   
   while emu.cpu.mcycles < test.cycles.len() {
-    emu.emu_step();
+    emu.cpu_step();
   }
   
   use pretty_assertions::assert_eq;
-  let res = cpu_to_mock(&mut emu, &test.end);
+  let res = cpu_to_mock(emu, &test.end);
   assert_eq!(res, test.end, "{}", test.name);
-  res == test.end
+  let eq = res == test.end;
+
+  for (addr, _) in &test.end.ram {
+    emu.dispatch_write(*addr, 0);
+  }
+  emu.cpu = CpuSM83::default();
+  eq
 }
 
 #[test]
@@ -105,7 +110,7 @@ fn exec_test() {
     ::from_str(include_str!("./sm83/v1/a9.json"))
     .unwrap();
 
-  let mut emu = emu::Emu::default();
+  let mut emu = emu::Emu::debug();
   println!("{:?}", emu.cpu);
 
   cpu_from_mock(&mut emu, &test[0].start);
@@ -127,11 +132,13 @@ fn exec_all_tests() {
   let files = fs::read_dir("./tests/sm83/v1/").expect("tests folder missing");
   let mut file_str = String::new();
 
+  let mut emu = Emu::debug();
+
   for file in files {
     let entry = file.unwrap();
 
     let name = entry.file_name().into_string().unwrap();
-    if name.starts_with("10") || name.starts_with("76") { continue; }
+    if !name.starts_with("76") { continue; }
 
     println!("{:?}", entry.file_name());
     let file = fs::File::open(entry.path()).unwrap();
@@ -140,7 +147,7 @@ fn exec_all_tests() {
     
     let tests: Vec<CpuTest> = serde_json::from_str(&file_str).unwrap(); 
     for test in tests {
-      cpu_test(&test);
+      cpu_test(&mut emu, &test);
     }
 
     file_str.clear();
