@@ -46,13 +46,13 @@ pub mod joypad {
   impl Joypad {
     // Note that, rather unconventionally for the Game Boy, a button being pressed is seen as the corresponding bit being 0, not 1.
     pub(super) fn read(&self) -> u8 {
-      let mut res = (0b1100_0000) |  ((self.select_dpad as u8) << 4) | ((self.select_btns as u8) << 5);
+      let mut res = (0b1100_0000) | ((self.select_dpad as u8) << 4) | ((self.select_btns as u8) << 5);
       
       // TODO: which wins when both are selected?
       if self.select_dpad {
-        res |= self.buttons.0 & 0xf
-      } else if self.select_btns {
         res |= self.buttons.0 >> 4
+      } else if self.select_btns {
+        res |= self.buttons.0 & 0xf
       } else { res = 0xff }
 
       res

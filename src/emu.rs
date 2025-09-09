@@ -37,7 +37,7 @@ impl Default for Emu {
       cpu: CpuSM83::default(),
       // reads from an absent cartridge usually return $FF
       ppu: Ppu::default(),
-      bus: Bus::new(vec![0xff; 32 * 1024]),
+      bus: Bus::new(vec![0xff; 32 * 1024], 0),
       joypad: Joypad::default(),
       header: CartHeader::default(),
       inte: Interrupt::default(),
@@ -66,7 +66,7 @@ impl Emu {
     Ok(Self {
       cpu: CpuSM83::default(),
       ppu: Ppu::default(),
-      bus: Bus::new(bytes),
+      bus: Bus::new(bytes, 0),
       joypad: Joypad::default(),
       header,
       inte: Interrupt::default(),
@@ -76,8 +76,44 @@ impl Emu {
     })
   }
 
-  pub fn emu_step(&mut self) {
-    self.cpu_step();
+  pub fn step_until_vblank(&mut self) {
+    while !self.frame_ready {
+      self.cpu_step();
+    }
+    self.frame_ready = false;
+  }
+
+  pub fn get_debug_framebuf_rgba(&self, buf: &mut [u8; 160 * 144 * 4]) {
+    const GB_PALETTE: [(u8, u8, u8); 4] = [
+      (155,188,15),
+      (139,172,15),
+      (48,98,48),
+      (15,56,15)
+    ];
+
+    for y in 0..18 {
+      for x in 0..20 {
+        let tile = self.bus.vram[0x1800 + y * 32 + x];
+        let tile_addr = self.ppu.tileset_addr(tile);
+
+        for row in 0..8 {
+          let pttrn_lo = self.bus.vram[tile_addr as usize - 0x8000 + row*2].reverse_bits();
+          let pttrn_hi = self.bus.vram[tile_addr as usize - 0x8000 + row*2 + 1].reverse_bits();
+
+          for col in 0..8 {
+            let pixel = (((pttrn_hi >> col) & 1) << 1) | ((pttrn_lo >> col) & 1);
+            let color = GB_PALETTE[pixel as usize];
+
+            let y = 160 * 4 * (y*8 + row);
+            let x = 4 * (x*8 + col);
+            buf[y + x + 0] = color.0;
+            buf[y + x + 1] = color.1;
+            buf[y + x + 2] = color.2;
+            buf[y + x + 3] = 255;
+          }
+        }
+      }
+    }
   }
 
   

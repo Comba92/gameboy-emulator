@@ -46,6 +46,8 @@ impl CartHeader {
     } else { Region::Overseas };
     header.version = bytes[0x14c];
 
+    println!("==[GAME LOADED]==\n{header:?}");
+
     Ok(header)
   }
 }

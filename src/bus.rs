@@ -11,13 +11,15 @@ pub(crate) struct Bus {
   hram: [u8; 127],
   rom: Vec<u8>,
   pub(crate) sram: Vec<u8>,
-  vram: [u8; 16 * 1024],
+  pub(crate) vram: [u8; 16 * 1024],
   wram: [u8; 32 * 1024],
-  oam: [u8; 160],
+  pub(crate) oam: [u8; 160],
 }
 
 impl Bus {
-  pub fn new(mut rom: Vec<u8>) -> Self {
+  pub fn new(mut rom: Vec<u8>, sram_size: usize) -> Self {
+    let sram_handler = if sram_size > 0 { Handler::Sram } else { Handler::OpenBus };
+
     let handlers = [
       Handler::Rom,
       Handler::Rom,
@@ -29,8 +31,8 @@ impl Bus {
       Handler::Rom,
       Handler::Vram,
       Handler::Vram,
-      Handler::Sram,
-      Handler::Sram,
+      sram_handler,
+      sram_handler,
       Handler::Wram,
       Handler::Wram,
       Handler::IO,
@@ -49,7 +51,7 @@ impl Bus {
       boot_sector,
       hram: [0xff; 127],
       rom,
-      sram: Vec::new(),
+      sram: vec![0; sram_size],
       vram: [0xff; 16 * 1024],
       wram: [0xff; 32 * 1024],
       oam: [0xff; 160],
@@ -73,7 +75,8 @@ impl Emu {
       } else if addr <= 0xfe9f {
         bus.oam[addr - 0xfe00]
       } else if addr <= 0xfeff {
-        todo!("unusable area")
+        // TODO: value returned depends on OAM blocked or not
+        0xff
       } else if addr <= 0xff7f {
         self.handle_io_read(addr)
       } else if addr <= 0xfffe {
@@ -102,7 +105,7 @@ impl Emu {
       } else if addr <= 0xfe9f {
         bus.oam[addr - 0xfe00] = val;
       } else if addr <= 0xfeff {
-        todo!("unusable area")
+        // Do nothing here
       } else if addr <= 0xff7f {
         self.handle_io_write(addr, val)
       } else if addr <= 0xfffe {

@@ -118,7 +118,7 @@ fn exec_test() {
   println!("{:?}", test[0]);
 
   while emu.cpu.mcycles < test[0].cycles.len() {
-    emu.emu_step();
+    emu.step_until_vblank();
   }
 
   let res = cpu_to_mock(&mut emu, &test[0].end);

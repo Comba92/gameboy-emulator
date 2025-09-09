@@ -63,6 +63,11 @@ impl Emu {
 
 	fn tick(&mut self) {
 		self.cpu.mcycles += 1;
+
+		self.ppu_step();
+		self.ppu_step();
+		self.ppu_step();
+		self.ppu_step();
 	}
 
 	pub fn cpu_step(&mut self) {
