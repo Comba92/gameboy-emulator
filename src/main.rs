@@ -1,11 +1,36 @@
+use std::io::{BufReader, Read, Seek};
+
 use gameboy_emulator::{emu::Emu, joypad::{self, *}};
 use sdl2::{event::Event, keyboard::Keycode};
+
+fn load_rom(path: &str) -> Result<Emu, Box<dyn std::error::Error>> {
+    let mut bytes = Vec::new();
+    let mut file = std::fs::File::open(path)?;
+
+    BufReader::new(&file).read_to_end(&mut bytes)
+        .or_else(|_| {
+            file.rewind().and_then(|_|
+                zip::read::ZipArchive::new(BufReader::new(&file))
+                .map_err(|e| e.into())
+                .and_then(|mut archive| {
+                    archive.by_index(0)
+                    .map_err(|e| e.into())
+                    .and_then(|mut zip| {
+                        zip.read_to_end(&mut bytes)
+                    })
+                })
+            )
+        })?;
+
+    Emu::new(bytes).map_err(|e| e.into())
+}
 
 fn main() {
     let sdl = sdl2::init().unwrap();
     let video = sdl.video().unwrap();
     let window = video.window("GameboyEmu", 160 * 3, 144 * 3)
         .position_centered()
+        .resizable()
         .build().unwrap();
     let mut canvas = window.into_canvas()
         .accelerated()
@@ -24,8 +49,7 @@ fn main() {
     let timer = sdl.timer().unwrap();
     let frame_rate = (1.0f64 / 59.73 * 1000.0).round() as u64;
 
-    let mut emu = Emu::from_slice(include_bytes!("../roms/Tennis (JUE) [!].gb")).unwrap();
-    let mut framebuf = [0; 160 * 144 * 4];
+    let mut emu = Emu::default();
 
     'running: loop {
         let frame_start = timer.ticks64();
@@ -33,6 +57,13 @@ fn main() {
         for event in events.poll_iter() {
             match event {
                 Event::Quit {..} => break 'running,
+                Event::DropFile { filename, .. } => {
+                    let new_emu = load_rom(&filename);
+                    match new_emu {
+                        Ok(res) => emu = res,
+                        Err(e) => eprintln!("{e}"),
+                    }
+                }
                 Event::KeyDown { keycode, .. } => {
                     if let Some(keycode) = keycode {
                         match keycode {
@@ -72,10 +103,9 @@ fn main() {
         canvas.clear();
 
         emu.step_until_vblank();
-        emu.get_debug_framebuf_rgba(&mut framebuf);
 
         tex.with_lock(None, |pixels, _| {
-            pixels.copy_from_slice(&framebuf);
+            emu.get_framebuf_rgba(pixels);
         }).unwrap();
         canvas.copy(&tex, None, None).unwrap();
 

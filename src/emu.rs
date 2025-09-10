@@ -27,7 +27,7 @@ pub struct Emu {
   pub(crate) intf: Interrupt,
 
   header: CartHeader,
-  pub(crate) videobuf: [u8; 160 * 140],
+  pub(crate) videobuf: [u8; 160 * 144],
   pub(crate) frame_ready: bool,
 }
 
@@ -42,7 +42,7 @@ impl Default for Emu {
       header: CartHeader::default(),
       inte: Interrupt::default(),
       intf: Interrupt::default(),
-      videobuf: [0; 160 * 140],
+      videobuf: [0; 160 * 144],
       frame_ready: false,
     }
   }
@@ -71,10 +71,19 @@ impl Emu {
       header,
       inte: Interrupt::default(),
       intf: Interrupt::default(),
-      videobuf: [0; 160 * 140],
+      videobuf: [0; 160 * 144],
       frame_ready: false,
     })
   }
+
+	pub(crate) fn tick(&mut self) {
+		self.cpu.mcycles += 1;
+
+		self.ppu_step();
+		self.ppu_step();
+		self.ppu_step();
+		self.ppu_step();
+	}
 
   pub fn step_until_vblank(&mut self) {
     while !self.frame_ready {
@@ -83,6 +92,7 @@ impl Emu {
     self.frame_ready = false;
   }
 
+  #[deprecated]
   pub fn get_debug_framebuf_rgba(&self, buf: &mut [u8; 160 * 144 * 4]) {
     const GB_PALETTE: [(u8, u8, u8); 4] = [
       (155,188,15),
@@ -116,7 +126,23 @@ impl Emu {
     }
   }
 
-  
+  pub fn get_framebuf_rgba(&self, buf: &mut [u8]) {
+    const GB_PALETTE: [(u8, u8, u8); 4] = [
+      (155,188,15),
+      (139,172,15),
+      (48,98,48),
+      (15,56,15)
+    ];
+
+    for (i, pixel) in self.videobuf.iter().enumerate() {
+      let color = GB_PALETTE[*pixel as usize];
+      buf[i * 4 + 0] = color.0;
+      buf[i * 4 + 1] = color.1;
+      buf[i * 4 + 2] = color.2;
+      buf[i * 4 + 3] = 255;
+    }
+  }
+
   pub fn btn_pressed(&mut self, btn: u8) {
     // if button is pressed, it should be 0
     let curr = self.joypad.buttons.into_bits();

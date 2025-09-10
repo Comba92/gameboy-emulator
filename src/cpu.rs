@@ -61,15 +61,6 @@ impl Emu {
 		self.cpu.f.set_zero(val == 0);
 	}
 
-	fn tick(&mut self) {
-		self.cpu.mcycles += 1;
-
-		self.ppu_step();
-		self.ppu_step();
-		self.ppu_step();
-		self.ppu_step();
-	}
-
 	pub fn cpu_step(&mut self) {
 		self.handle_interrupts();
 		if self.cpu.ei {
