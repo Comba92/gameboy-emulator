@@ -144,8 +144,8 @@ impl Emu {
         let ppu = &mut self.ppu;
         ppu.ctrl.set_bits(val);
         ppu.obj_size = if ppu.ctrl.obj_size() { 16 } else { 8 };
-        ppu.bg_tilemap  = if ppu.ctrl.bg_tilemap() { 0x9800 } else { 0x9c00 };
-        ppu.win_tilemap = if ppu.ctrl.win_tileamp() { 0x9800 } else { 0x9c00 };
+        ppu.bg_tilemap  = if ppu.ctrl.bg_tilemap() { 0x9c00 } else { 0x9800 };
+        ppu.win_tilemap = if ppu.ctrl.win_tileamp() { 0x9c00 } else { 0x9800 };
       }
       0xff41 => {
         let stat = self.ppu.stat.into_bits();
@@ -153,7 +153,10 @@ impl Emu {
       }
       0xff42 => self.ppu.scy = val,
       0xff43 => self.ppu.scx = val,
-      0xff45 => self.ppu.lyc = val,
+      0xff45 => {
+        self.ppu.lyc = val;
+        self.handle_lyc();
+      }
       0xff47 => self.ppu.bgp = val,
       0xff48 => self.ppu.obp0 = val,
       0xff49 => self.ppu.obp1 = val,

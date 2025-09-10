@@ -27,7 +27,18 @@ pub(crate) struct Stat {
   mode1_int: bool,
   mode2_int: bool,
   lyc_int: bool,
+  #[bits(default = true)]
   _unused: bool,
+}
+
+#[bitfield(u8)]
+struct StatInterrupts {
+  lyc: bool,
+  mode0: bool,
+  mode1: bool,
+  mode2: bool,
+  #[bits(4)]
+  _unused: u8,
 }
 
 #[bitfield(u8)]
@@ -43,10 +54,11 @@ struct PixelData {
 
 #[derive(Default)]
 enum FetcherState {
-  #[default] TileIdIdle, TileId, TileLoIdle, TileLo, TileHiIdle, TileHi, Push
+  #[default] VramWait, Vram, TileLoWait, TileLo, TileHiWait, TileHi, Push
 }
 struct Fetcher {
   pixel_x: i16,
+  pixel_y: u16,
   tile_count: u8,
   tile_id: u8,
   tile_data_addr: u16,
@@ -57,7 +69,9 @@ struct Fetcher {
 impl Default for Fetcher {
   fn default() -> Self {
     Self {
+      // the fetcher starts rendering from the first tile to the left of the viewport (first tile is fetched two times)
       pixel_x: -8,
+      pixel_y: 0,
       tile_count: 0,
       tile_id: 0,
       tile_data_addr: 0,
@@ -96,6 +110,9 @@ pub struct Ppu {
   pub(crate) bg_tilemap: u16,
   pub(crate) win_tilemap: u16,
 
+  win_ly: u8,
+  win_wy_cond: bool,
+  win_wx_cond: bool,
   bg_fetcher: Fetcher,
   bg_fifo: VecDeque<PixelData>,
 
@@ -115,48 +132,79 @@ impl Ppu {
     }
   }
 
-  fn bg_tilemap(&self) -> u16 {
-    if self.ctrl.bg_tilemap() {
-      0x9c00
-    } else {
-      0x9800
-    }
-  }
-
+  // TODO: consider precomputing these
   fn color_from_palette(&self, color_id: u8) -> u8 {
     (self.bgp >> (color_id * 2)) & 0b11
   }
 }
 
 impl Emu {
+  pub(crate) fn handle_lyc(&mut self) {
+    let ppu = &mut self.ppu;
+    ppu.stat.set_lyc_eq_ly(ppu.ly == ppu.lyc);
+    if ppu.stat.lyc_eq_ly() && ppu.stat.lyc_int() {
+      self.intf.set_lcd(true);
+    }
+  }
+
   fn fetcher_step(&mut self) {
     let ppu = &mut self.ppu;
 
-    // TODO: a lot of values can be precomputed
+    if !ppu.win_wx_cond {
+      let is_window_tile = ppu.ctrl.win_enable()
+        && ppu.win_wy_cond
+        && ppu.bg_fetcher.pixel_x + 7 == ppu.wx as i16;
+
+      if is_window_tile {
+        ppu.win_wx_cond = true;
+        // When rendering the window the background FIFO is cleared and the fetcher is reset to step 1.
+        // A 6-dot penalty is incurred while the BG fetcher is being set up for the window.
+        ppu.bg_fetcher.tile_count = 0;
+        ppu.bg_fetcher.state = VramWait;
+        ppu.bg_fifo.clear();
+      }
+    }
 
     use FetcherState::*;
     match ppu.bg_fetcher.state {
-      TileIdIdle => ppu.bg_fetcher.state = TileId,
-      TileId => {
-        ppu.bg_fetcher.state = TileLoIdle;
+      VramWait => ppu.bg_fetcher.state = Vram,
+      Vram => {
+        ppu.bg_fetcher.state = TileLoWait;
 
-        let tile_x = (ppu.bg_fetcher.tile_count as u16 + ppu.scx as u16 / 8) % 32;
-        let tile_y = 32 * (((ppu.ly as u16 + ppu.scy as u16) % 256) / 8);
-        let vram_addr = ppu.bg_tilemap() + ((tile_x + tile_y) % 1024);
+        let vram_addr = match ppu.win_wx_cond {
+          false => {
+            // background
+            // The scroll registers are re-read on each tile fetch, except for the low 3 bits of SCX, which are only read at the beginning of the scanline (for the initial shifting of pixels).
+            let tile_x = (ppu.bg_fetcher.tile_count as u16 + ppu.scx as u16 / 8) % 32;
+            ppu.bg_fetcher.pixel_y = ppu.ly as u16 + ppu.scy as u16;
+            let tile_y = 32 * ((ppu.bg_fetcher.pixel_y % 256) / 8);
+            let tile_offset = tile_y + tile_x;
+            ppu.bg_tilemap + (tile_offset % 1024)
+          }
+          true => {
+            // window
+            let tile_x = ppu.bg_fetcher.tile_count as u16;
+            ppu.bg_fetcher.pixel_y = ppu.win_ly as u16;
+            let tile_y = 32 * (ppu.bg_fetcher.pixel_y / 8);
+            let tile_offset = tile_y + tile_x;
+            ppu.win_tilemap + (tile_offset % 1024)
+          }
+        };
+
         self.ppu.bg_fetcher.tile_id = self.dispatch_read(vram_addr);
       }
 
-      TileLoIdle => ppu.bg_fetcher.state = TileLo,
+      TileLoWait => ppu.bg_fetcher.state = TileLo,
       TileLo => {
-        ppu.bg_fetcher.state = TileHiIdle;
+        ppu.bg_fetcher.state = TileHiWait;
 
         let tile_addr = ppu.tileset_addr(ppu.bg_fetcher.tile_id);
-        let tile_data_addr = tile_addr + 2 * ((ppu.ly as u16 + ppu.scy as u16) % 8);
+        let tile_data_addr = tile_addr + 2 * (ppu.bg_fetcher.pixel_y % 8);
         ppu.bg_fetcher.tile_data_addr = tile_data_addr;
         self.ppu.bg_fetcher.tile_data_lo = self.dispatch_read(tile_data_addr);
       },
 
-      TileHiIdle => ppu.bg_fetcher.state = TileHi,
+      TileHiWait => ppu.bg_fetcher.state = TileHi,
       TileHi => {
         ppu.bg_fetcher.state = Push;
 
@@ -164,26 +212,25 @@ impl Emu {
         self.ppu.bg_fetcher.tile_data_hi = self.dispatch_read(tile_data_addr);
       },
 
-      Push => {
-        if ppu.bg_fifo.is_empty() {
-          ppu.bg_fetcher.state = TileIdIdle;
+      Push => if ppu.bg_fifo.is_empty() {
+        ppu.bg_fetcher.state = VramWait;
 
-          // The 12 extra dots of penalty come from two tile fetches at the beginning of Mode 3. One is the first tile in the scanline (the one that gets shifted by SCX % 8 pixels), the other is simply discarded.
-          if ppu.bg_fetcher.pixel_x > -8 {
-            ppu.bg_fetcher.tile_count += 1;
-          }
+        // The 12 extra dots of penalty come from two tile fetches at the beginning of Mode 3. One is the first tile in the scanline (the one that gets shifted by SCX % 8 pixels), the other is simply discarded.
+        // pixel_x starts at -8 or less (if SCX%8 > 0). If it is less than -8, it means we are rendering the first tile, and we should fetch it twice 
+        if ppu.bg_fetcher.pixel_x > -8 {
+          ppu.bg_fetcher.tile_count += 1;
+        }
 
-          for i in (0..8).rev() {
-            let color_lo = (ppu.bg_fetcher.tile_data_lo >> i) & 1;
-            let color_hi = (ppu.bg_fetcher.tile_data_hi >> i) & 1;
-            let color = (color_hi << 1) | color_lo;
+        for i in (0..8).rev() {
+          let color_lo = (ppu.bg_fetcher.tile_data_lo >> i) & 1;
+          let color_hi = (ppu.bg_fetcher.tile_data_hi >> i) & 1;
+          let color = (color_hi << 1) | color_lo;
 
-            let pixel_data = PixelDataBuilder::new()
-              .with_color(color)
-              .build();
+          let pixel_data = PixelDataBuilder::new()
+            .with_color(color)
+            .build();
 
-            ppu.bg_fifo.push_back(pixel_data);
-          }
+          ppu.bg_fifo.push_back(pixel_data);
         }
       }
     }
@@ -210,17 +257,22 @@ impl Emu {
 
   pub(crate) fn ppu_step(&mut self) {
     let ppu = &mut self.ppu;
+    // we increase it early, and transition to the next state now; next state will be handled next step
+    ppu.dots += 1;
+
     match ppu.mode {
       Mode::OamScan => {
-        ppu.dots += 1;
+        // WY condition was triggered: i.e. at some point in this frame the value of WY was equal to LY (checked at the start of Mode 2 only)
+        if ppu.ctrl.win_enable() && ppu.ly == ppu.wy {
+          ppu.win_wy_cond = true;
+        }
+
         if ppu.dots >= 80 {
           ppu.mode = Mode::Drawing;
         }
       }
 
       Mode::Drawing => {
-        ppu.dots += 1;
-
         self.fetcher_step();
         self.pixel_push();
 
@@ -230,10 +282,17 @@ impl Emu {
       }
 
       Mode::Hblank => {
-        ppu.dots += 1;
         if ppu.dots >= 456 {
           ppu.dots = 0;
           ppu.ly += 1;
+          self.handle_lyc();
+
+          let ppu = &mut self.ppu;
+          if ppu.win_wx_cond {
+            ppu.win_ly += 1;
+          }
+          ppu.win_wx_cond = false;
+
           if ppu.ly >= 144 {
             ppu.mode = Mode::Vblank;   
             self.intf.set_vblank(true);
@@ -248,13 +307,17 @@ impl Emu {
       }
 
       Mode::Vblank => {
-        ppu.dots += 1;
         if ppu.dots >= 456 {
           ppu.dots = 0;
           ppu.ly += 1;
+          self.handle_lyc();
+
+          let ppu = &mut self.ppu;
           if ppu.ly >= 154 {
             ppu.mode = Mode::OamScan;
             ppu.ly = 0;
+            ppu.win_ly = 0;
+            ppu.win_wy_cond = false;
             ppu.bg_fetcher.reset(ppu.scx);
             ppu.bg_fifo.clear();
           }

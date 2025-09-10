@@ -1,6 +1,6 @@
 use std::io::{BufReader, Read, Seek};
 
-use gameboy_emulator::{emu::Emu, joypad::{self, *}};
+use gameboy_emulator::{emu::Emu, joypad::{self}};
 use sdl2::{event::Event, keyboard::Keycode};
 
 fn load_rom(path: &str) -> Result<Emu, Box<dyn std::error::Error>> {
@@ -49,7 +49,7 @@ fn main() {
     let timer = sdl.timer().unwrap();
     let frame_rate = (1.0f64 / 59.73 * 1000.0).round() as u64;
 
-    let mut emu = Emu::default();
+    let mut emu = Emu::from_slice(include_bytes!("../roms/dmg-acid2.gb")).unwrap();
 
     'running: loop {
         let frame_start = timer.ticks64();
