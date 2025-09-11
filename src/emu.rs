@@ -78,7 +78,8 @@ impl Emu {
 
 	pub(crate) fn tick(&mut self) {
 		self.cpu.mcycles += 1;
-
+    self.dma_step();
+    
 		self.ppu_step();
 		self.ppu_step();
 		self.ppu_step();

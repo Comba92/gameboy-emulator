@@ -7,3 +7,4 @@ https://github.com/h3nnn4n/gameboy_documentation
 - VRAM and OAM accesses
 - LCD interrupts
 - LCD enable/disable
+- DMA conflicts

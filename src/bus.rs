@@ -5,6 +5,13 @@ pub(crate) enum Handler {
   Rom, Vram, Sram, Wram, IO, OpenBus, Debug
 }
 
+#[derive(Default)]
+struct Dma {
+  src: u8,
+  transfering: bool,
+  count: u8,
+}
+
 pub(crate) struct Bus {
   pub(crate) handlers: [Handler; 16],
   boot_sector: Option<Vec<u8>>,
@@ -14,6 +21,8 @@ pub(crate) struct Bus {
   pub(crate) vram: [u8; 16 * 1024],
   wram: [u8; 32 * 1024],
   pub(crate) oam: [u8; 160],
+
+  dma: Dma,
 }
 
 impl Bus {
@@ -55,11 +64,26 @@ impl Bus {
       vram: [0xff; 16 * 1024],
       wram: [0xff; 32 * 1024],
       oam: [0xff; 160],
+
+      dma: Default::default(),
     }
   }
 }
 
 impl Emu {
+  pub fn dma_step(&mut self) {
+    if self.bus.dma.transfering {
+      let src_addr = ((self.bus.dma.src as u16) << 8) | self.bus.dma.count as u16;
+      let val = self.dispatch_read(src_addr);
+      self.dispatch_write(0xfe00 | self.bus.dma.count as u16, val);
+      self.bus.dma.count += 1;
+
+      if self.bus.dma.count >= 160 {
+        self.bus.dma.transfering = false;
+      }
+    }
+  }
+
   pub fn dispatch_read(&mut self, addr: u16) -> u8 {
     let bus = &mut self.bus;
     let addr = addr as usize;
@@ -127,6 +151,7 @@ impl Emu {
       0xff43 => self.ppu.scx,
       0xff44 => self.ppu.ly,
       0xff45 => self.ppu.lyc,
+      0xff46 => self.bus.dma.src,
       0xff47 => self.ppu.bgp,
       0xff48 => self.ppu.obp0,
       0xff49 => self.ppu.obp1,
@@ -155,7 +180,12 @@ impl Emu {
       0xff43 => self.ppu.scx = val,
       0xff45 => {
         self.ppu.lyc = val;
-        self.handle_lyc();
+        self.handle_lyc_int();
+      }
+      0xff46 => {
+        self.bus.dma.src = val;
+        self.bus.dma.transfering = true;
+        self.bus.dma.count = 0;
       }
       0xff47 => self.ppu.bgp = val,
       0xff48 => self.ppu.obp0 = val,

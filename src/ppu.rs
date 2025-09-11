@@ -32,16 +32,6 @@ pub(crate) struct Stat {
 }
 
 #[bitfield(u8)]
-struct StatInterrupts {
-  lyc: bool,
-  mode0: bool,
-  mode1: bool,
-  mode2: bool,
-  #[bits(4)]
-  _unused: u8,
-}
-
-#[bitfield(u8)]
 struct PixelData {
   #[bits(2)]
   color: u8,
@@ -88,7 +78,21 @@ impl Fetcher {
   }
 }
 
-#[derive(Default)]
+struct Sprite {
+  drawn: bool,
+  x: u8,
+  tile_row: u8,
+  tile_id: u8,
+  attributes: u8,
+}
+impl Sprite {
+  fn priority(&self) -> bool { self.attributes & 0x80 > 0 }
+  fn flip_y(&self) -> bool { self.attributes & 0x40 > 0 }
+  fn flip_x(&self) -> bool { self.attributes & 0x20 > 0 }
+  fn dmg_palette(&self) -> bool { self.attributes & 0x10 > 0 }
+}
+
+#[derive(Default, Clone, Copy)]
 enum Mode {
   #[default] OamScan = 2, Drawing = 3, Hblank = 0, Vblank = 1
 }
@@ -110,11 +114,16 @@ pub struct Ppu {
   pub(crate) bg_tilemap: u16,
   pub(crate) win_tilemap: u16,
 
+  fetcher: Fetcher,
+
   win_ly: u8,
-  win_wy_cond: bool,
-  win_wx_cond: bool,
-  bg_fetcher: Fetcher,
+  is_window_in_scanline: bool,
+  is_fetching_window: bool,
   bg_fifo: VecDeque<PixelData>,
+
+  obj_to_fetch: Option<usize>,
+  obj_buf: Vec<Sprite>,
+  obj_fifo: VecDeque<PixelData>,
 
   mode: Mode,
   dots: u16,
@@ -123,7 +132,8 @@ impl Ppu {
   pub(crate) fn tileset_addr(&self, tile_number: u8) -> u16 {
     if self.ctrl.tileset_mode() {
       // unsigned mode
-      0x8000 + tile_number as u16 * 16
+      let offset = tile_number as u16 * 16;
+      0x8000 | offset
     } else {
       // signed mode
       let tile_number = tile_number as i8 as i16;
@@ -133,13 +143,24 @@ impl Ppu {
   }
 
   // TODO: consider precomputing these
-  fn color_from_palette(&self, color_id: u8) -> u8 {
+  fn color_from_bg_palette(&self, color_id: u8) -> u8 {
     (self.bgp >> (color_id * 2)) & 0b11
+  }
+
+  fn color_from_obj_palette(&self, palette_select: u8, color_id: u8) -> u8 {
+    if color_id == 0 { return 0 };
+    
+    let palette = match palette_select {
+      0 => self.obp0,
+      _  => self.obp1
+    };
+
+    (palette >> (color_id * 2)) & 0b11
   }
 }
 
 impl Emu {
-  pub(crate) fn handle_lyc(&mut self) {
+  pub(crate) fn handle_lyc_int(&mut self) {
     let ppu = &mut self.ppu;
     ppu.stat.set_lyc_eq_ly(ppu.ly == ppu.lyc);
     if ppu.stat.lyc_eq_ly() && ppu.stat.lyc_int() {
@@ -147,83 +168,145 @@ impl Emu {
     }
   }
 
+  fn handle_mode0_int(&mut self) {
+    self.ppu.stat.set_ppu_mode(self.ppu.mode as u8);
+    if self.ppu.stat.mode0_int() {
+      self.intf.set_lcd(true);
+    }
+  }
+
+  fn handle_mode1_int(&mut self) {
+    self.ppu.stat.set_ppu_mode(self.ppu.mode as u8);
+    if self.ppu.stat.mode1_int() {
+      self.intf.set_lcd(true);
+    }
+  }
+
+  fn handle_mode2_int(&mut self) {
+    self.ppu.stat.set_ppu_mode(self.ppu.mode as u8);
+    if self.ppu.stat.mode2_int() {
+      self.intf.set_lcd(true);
+    }
+  }
+
+  // TODO: every byte fetch should take 2 tcycles
+  fn oam_scan(&mut self) {
+    self.ppu.obj_buf.clear();
+
+    for bytes in self.bus.oam.chunks(4) {
+      let y = bytes[0];
+      let ly = self.ppu.ly + 16;
+
+      if y <= ly && ly < y + self.ppu.obj_size {
+        let sprite = Sprite {
+          drawn: false,
+          tile_row: ly - bytes[0],
+          x: bytes[1],
+          tile_id: bytes[2],
+          attributes: bytes[3],
+        };
+        self.ppu.obj_buf.push(sprite);
+        if self.ppu.obj_buf.len() >= 10 { break; }
+      }
+    }
+  }
+
   fn fetcher_step(&mut self) {
     let ppu = &mut self.ppu;
 
-    if !ppu.win_wx_cond {
-      let is_window_tile = ppu.ctrl.win_enable()
-        && ppu.win_wy_cond
-        && ppu.bg_fetcher.pixel_x + 7 == ppu.wx as i16;
+    if ppu.obj_to_fetch.is_none() {
+      if let Some(obj) = ppu.obj_buf.iter()
+      .position(|s| !s.drawn && s.x as i16 == ppu.fetcher.pixel_x + 8) 
+      {
+        ppu.fetcher.state = FetcherState::default();
+        ppu.obj_fifo.clear();
+        ppu.obj_to_fetch = Some(obj);
+      }
+    }
 
-      if is_window_tile {
-        ppu.win_wx_cond = true;
+    if !ppu.is_fetching_window {
+      let is_window_first_tile = ppu.ctrl.win_enable()
+        && ppu.is_window_in_scanline
+        && ppu.fetcher.pixel_x + 7 == ppu.wx as i16;
+
+      if is_window_first_tile {
+        ppu.is_fetching_window = true;
         // When rendering the window the background FIFO is cleared and the fetcher is reset to step 1.
         // A 6-dot penalty is incurred while the BG fetcher is being set up for the window.
-        ppu.bg_fetcher.tile_count = 0;
-        ppu.bg_fetcher.state = VramWait;
+        ppu.fetcher.tile_count = 0;
+        ppu.fetcher.state = FetcherState::default();
         ppu.bg_fifo.clear();
       }
     }
 
-    use FetcherState::*;
-    match ppu.bg_fetcher.state {
-      VramWait => ppu.bg_fetcher.state = Vram,
-      Vram => {
-        ppu.bg_fetcher.state = TileLoWait;
+    match ppu.obj_to_fetch {
+      Some(obj_idx) => self.fetch_obj(obj_idx),
+      None => self.fetch_bg(),
+    }
+  }
 
-        let vram_addr = match ppu.win_wx_cond {
+  fn fetch_bg(&mut self) {
+    let ppu = &mut self.ppu;
+    
+    use FetcherState::*;
+    match ppu.fetcher.state {
+      VramWait => ppu.fetcher.state = Vram,
+      Vram => {
+        ppu.fetcher.state = TileLoWait;
+
+        let vram_addr = match ppu.is_fetching_window {
           false => {
             // background
             // The scroll registers are re-read on each tile fetch, except for the low 3 bits of SCX, which are only read at the beginning of the scanline (for the initial shifting of pixels).
-            let tile_x = (ppu.bg_fetcher.tile_count as u16 + ppu.scx as u16 / 8) % 32;
-            ppu.bg_fetcher.pixel_y = ppu.ly as u16 + ppu.scy as u16;
-            let tile_y = 32 * ((ppu.bg_fetcher.pixel_y % 256) / 8);
+            let tile_x = (ppu.fetcher.tile_count as u16 + ppu.scx as u16 / 8) % 32;
+            ppu.fetcher.pixel_y = ppu.ly as u16 + ppu.scy as u16;
+            let tile_y = 32 * ((ppu.fetcher.pixel_y % 256) / 8);
             let tile_offset = tile_y + tile_x;
             ppu.bg_tilemap + (tile_offset % 1024)
           }
           true => {
             // window
-            let tile_x = ppu.bg_fetcher.tile_count as u16;
-            ppu.bg_fetcher.pixel_y = ppu.win_ly as u16;
-            let tile_y = 32 * (ppu.bg_fetcher.pixel_y / 8);
+            let tile_x = ppu.fetcher.tile_count as u16;
+            ppu.fetcher.pixel_y = ppu.win_ly as u16;
+            let tile_y = 32 * (ppu.fetcher.pixel_y / 8);
             let tile_offset = tile_y + tile_x;
             ppu.win_tilemap + (tile_offset % 1024)
           }
         };
 
-        self.ppu.bg_fetcher.tile_id = self.dispatch_read(vram_addr);
+        self.ppu.fetcher.tile_id = self.dispatch_read(vram_addr);
       }
 
-      TileLoWait => ppu.bg_fetcher.state = TileLo,
+      TileLoWait => ppu.fetcher.state = TileLo,
       TileLo => {
-        ppu.bg_fetcher.state = TileHiWait;
+        ppu.fetcher.state = TileHiWait;
 
-        let tile_addr = ppu.tileset_addr(ppu.bg_fetcher.tile_id);
-        let tile_data_addr = tile_addr + 2 * (ppu.bg_fetcher.pixel_y % 8);
-        ppu.bg_fetcher.tile_data_addr = tile_data_addr;
-        self.ppu.bg_fetcher.tile_data_lo = self.dispatch_read(tile_data_addr);
+        let tile_addr = ppu.tileset_addr(ppu.fetcher.tile_id);
+        let tile_data_addr = tile_addr + 2 * (ppu.fetcher.pixel_y % 8);
+        ppu.fetcher.tile_data_addr = tile_data_addr;
+        self.ppu.fetcher.tile_data_lo = self.dispatch_read(tile_data_addr);
       },
 
-      TileHiWait => ppu.bg_fetcher.state = TileHi,
+      TileHiWait => ppu.fetcher.state = TileHi,
       TileHi => {
-        ppu.bg_fetcher.state = Push;
+        ppu.fetcher.state = Push;
 
-        let tile_data_addr = ppu.bg_fetcher.tile_data_addr + 1;
-        self.ppu.bg_fetcher.tile_data_hi = self.dispatch_read(tile_data_addr);
+        let tile_data_addr = ppu.fetcher.tile_data_addr + 1;
+        self.ppu.fetcher.tile_data_hi = self.dispatch_read(tile_data_addr);
       },
 
       Push => if ppu.bg_fifo.is_empty() {
-        ppu.bg_fetcher.state = VramWait;
+        ppu.fetcher.state = VramWait;
 
         // The 12 extra dots of penalty come from two tile fetches at the beginning of Mode 3. One is the first tile in the scanline (the one that gets shifted by SCX % 8 pixels), the other is simply discarded.
         // pixel_x starts at -8 or less (if SCX%8 > 0). If it is less than -8, it means we are rendering the first tile, and we should fetch it twice 
-        if ppu.bg_fetcher.pixel_x > -8 {
-          ppu.bg_fetcher.tile_count += 1;
+        if ppu.fetcher.pixel_x > -8 {
+          ppu.fetcher.tile_count += 1;
         }
 
         for i in (0..8).rev() {
-          let color_lo = (ppu.bg_fetcher.tile_data_lo >> i) & 1;
-          let color_hi = (ppu.bg_fetcher.tile_data_hi >> i) & 1;
+          let color_lo = (ppu.fetcher.tile_data_lo >> i) & 1;
+          let color_hi = (ppu.fetcher.tile_data_hi >> i) & 1;
           let color = (color_hi << 1) | color_lo;
 
           let pixel_data = PixelDataBuilder::new()
@@ -236,22 +319,94 @@ impl Emu {
     }
   }
 
+  fn fetch_obj(&mut self, obj_idx: usize) {
+    let ppu = &mut self.ppu;
+    
+    use FetcherState::*;
+    match ppu.fetcher.state {
+      VramWait => ppu.fetcher.state = Vram,
+      Vram => {
+        ppu.fetcher.state = TileLoWait;
+
+        let obj = &mut ppu.obj_buf[obj_idx];
+        obj.drawn = true;
+        ppu.fetcher.pixel_y = if obj.flip_y() { 7 - obj.tile_row } else { obj.tile_row } as u16; 
+        ppu.fetcher.tile_id = obj.tile_id;
+      }
+
+      TileLoWait => ppu.fetcher.state = TileLo,
+      TileLo => {
+        ppu.fetcher.state = TileHiWait;
+
+        let tile_addr = 0x8000 | (ppu.fetcher.tile_id as u16 * 16);
+        let tile_data_addr = tile_addr + 2 * (ppu.fetcher.pixel_y % 8);
+        ppu.fetcher.tile_data_addr = tile_data_addr;
+        self.ppu.fetcher.tile_data_lo = self.dispatch_read(tile_data_addr);
+      },
+
+      TileHiWait => ppu.fetcher.state = TileHi,
+      TileHi => {
+        ppu.fetcher.state = Push;
+
+        let tile_data_addr = ppu.fetcher.tile_data_addr + 1;
+        self.ppu.fetcher.tile_data_hi = self.dispatch_read(tile_data_addr);
+      },
+
+      Push => {
+        ppu.fetcher.state = VramWait;
+
+        let obj = &ppu.obj_buf[obj_idx];
+        if obj.flip_x() {
+          ppu.fetcher.tile_data_lo = ppu.fetcher.tile_data_lo.reverse_bits();
+          ppu.fetcher.tile_data_hi = ppu.fetcher.tile_data_hi.reverse_bits();
+        }
+
+        for i in (0..8).rev() {
+          let color_lo = (ppu.fetcher.tile_data_lo >> i) & 1;
+          let color_hi = (ppu.fetcher.tile_data_hi >> i) & 1;
+          let color = (color_hi << 1) | color_lo;
+
+          let pixel_data = PixelDataBuilder::new()
+            .with_color(color)
+            .with_palette(obj.dmg_palette() as u8)
+            .with_priority(obj.priority())
+            .build();
+
+          ppu.obj_fifo.push_back(pixel_data);
+        }
+
+        ppu.obj_to_fetch = None;
+      }
+    }
+  }
+
   fn pixel_push(&mut self) {
     let ppu = &mut self.ppu;
 
-    if !ppu.bg_fifo.is_empty() {
-      if ppu.bg_fetcher.pixel_x < 0 {
+    if !ppu.bg_fifo.is_empty() && ppu.obj_to_fetch.is_none() {
+      if ppu.fetcher.pixel_x < 0 {
         // discard pixel
         ppu.bg_fifo.pop_front();
+        ppu.obj_fifo.pop_front();
       } else {
         // push pixel to framebuffer
-        let pixel = ppu.bg_fifo.pop_front().unwrap();
-        let color = ppu.color_from_palette(pixel.color());
-        let idx = (ppu.ly as usize * 160) + ppu.bg_fetcher.pixel_x as usize;
-        self.videobuf[idx] = color;
+        let bg_pixel = ppu.bg_fifo.pop_front().unwrap();
+        let obj_pixel = ppu.obj_fifo.pop_front().unwrap_or_default();
+
+        let bg_color = ppu.color_from_bg_palette(bg_pixel.color());
+        let obj_color = ppu.color_from_obj_palette(obj_pixel.palette(), obj_pixel.color());
+
+        let final_color = if obj_color > 0 {
+          obj_color
+        } else {
+          bg_color
+        };
+
+        let idx = (ppu.ly as usize * 160) + ppu.fetcher.pixel_x as usize;
+        self.videobuf[idx] = final_color;
       }
 
-      ppu.bg_fetcher.pixel_x += 1;
+      ppu.fetcher.pixel_x += 1;
     }
   }
 
@@ -263,12 +418,14 @@ impl Emu {
     match ppu.mode {
       Mode::OamScan => {
         // WY condition was triggered: i.e. at some point in this frame the value of WY was equal to LY (checked at the start of Mode 2 only)
-        if ppu.ctrl.win_enable() && ppu.ly == ppu.wy {
-          ppu.win_wy_cond = true;
+        if ppu.dots-1 == 0 && ppu.ctrl.win_enable() && ppu.ly == ppu.wy {
+          ppu.is_window_in_scanline = true;
         }
 
         if ppu.dots >= 80 {
           ppu.mode = Mode::Drawing;
+          ppu.stat.set_ppu_mode(ppu.mode as u8);
+          self.oam_scan();
         }
       }
 
@@ -276,8 +433,9 @@ impl Emu {
         self.fetcher_step();
         self.pixel_push();
 
-        if self.ppu.bg_fetcher.pixel_x >= 160 {
+        if self.ppu.fetcher.pixel_x >= 160 {
           self.ppu.mode = Mode::Hblank;
+          self.handle_mode0_int();
         }
       }
 
@@ -285,23 +443,29 @@ impl Emu {
         if ppu.dots >= 456 {
           ppu.dots = 0;
           ppu.ly += 1;
-          self.handle_lyc();
+          self.handle_lyc_int();
 
           let ppu = &mut self.ppu;
-          if ppu.win_wx_cond {
+          if ppu.is_fetching_window {
             ppu.win_ly += 1;
           }
-          ppu.win_wx_cond = false;
+          ppu.is_fetching_window = false;
 
           if ppu.ly >= 144 {
-            ppu.mode = Mode::Vblank;   
+            ppu.mode = Mode::Vblank;
+            self.handle_mode1_int();
+            
             self.intf.set_vblank(true);
             self.frame_ready = true;
           } else {
-            ppu.mode = Mode::OamScan;
             // The scroll registers are re-read on each tile fetch, except for the low 3 bits of SCX, which are only read at the beginning of the scanline (for the initial shifting of pixels).
-            self.ppu.bg_fetcher.reset(self.ppu.scx);
-            self.ppu.bg_fifo.clear();
+            ppu.fetcher.reset(ppu.scx);
+            ppu.bg_fifo.clear();
+            ppu.obj_fifo.clear();
+            ppu.obj_to_fetch = None;
+
+            ppu.mode = Mode::OamScan;
+            self.handle_mode2_int();
           }
         }
       }
@@ -310,16 +474,20 @@ impl Emu {
         if ppu.dots >= 456 {
           ppu.dots = 0;
           ppu.ly += 1;
-          self.handle_lyc();
+          self.handle_lyc_int();
 
           let ppu = &mut self.ppu;
           if ppu.ly >= 154 {
-            ppu.mode = Mode::OamScan;
             ppu.ly = 0;
             ppu.win_ly = 0;
-            ppu.win_wy_cond = false;
-            ppu.bg_fetcher.reset(ppu.scx);
+            ppu.is_window_in_scanline = false;
+            ppu.fetcher.reset(ppu.scx);
             ppu.bg_fifo.clear();
+            ppu.obj_fifo.clear();
+            ppu.obj_to_fetch = None;
+            
+            ppu.mode = Mode::OamScan;
+            self.handle_mode2_int();
           }
         }
       }
