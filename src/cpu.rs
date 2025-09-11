@@ -681,7 +681,7 @@ impl Emu {
 	fn ei(&mut self) { self.cpu.ei = true; }
 
 	fn stop(&mut self, _get: OpGet<u8>) {
-		todo!()
+		todo!("stop")
 	}
 
 	fn halt(&mut self) {

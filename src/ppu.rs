@@ -122,9 +122,10 @@ pub struct Ppu {
   bg_fifo: VecDeque<PixelData>,
 
   obj_to_fetch: Option<usize>,
+  is_fetching_objects: bool,
   obj_buf: Vec<Sprite>,
   obj_fifo: VecDeque<PixelData>,
-
+  
   mode: Mode,
   dots: u16,
 }
@@ -216,11 +217,13 @@ impl Emu {
 
     if ppu.obj_to_fetch.is_none() {
       if let Some(obj) = ppu.obj_buf.iter()
-      .position(|s| !s.drawn && s.x as i16 == ppu.fetcher.pixel_x + 8) 
+        .position(|s| !s.drawn && s.x as i16 == ppu.fetcher.pixel_x + 8)
       {
+        ppu.is_fetching_objects = true;
         ppu.fetcher.state = FetcherState::default();
-        ppu.obj_fifo.clear();
         ppu.obj_to_fetch = Some(obj);
+      } else {
+        ppu.is_fetching_objects = false;
       }
     }
 
@@ -329,17 +332,19 @@ impl Emu {
         ppu.fetcher.state = TileLoWait;
 
         let obj = &mut ppu.obj_buf[obj_idx];
-        obj.drawn = true;
-        ppu.fetcher.pixel_y = if obj.flip_y() { 7 - obj.tile_row } else { obj.tile_row } as u16; 
-        ppu.fetcher.tile_id = obj.tile_id;
+        // In 8×16 mode (LCDC bit 2 = 1), the memory area at $8000-$8FFF is still interpreted as a series of 8×8 tiles, where every 2 tiles form an object.
+        ppu.fetcher.pixel_y = if obj.flip_y() { ppu.obj_size - 1 - obj.tile_row } else { obj.tile_row } as u16;
+        // In 8×16 mode, the least significant bit of the tile index is ignored;
+        ppu.fetcher.tile_id = if ppu.ctrl.obj_size() { obj.tile_id & !1 } else { obj.tile_id };
       }
 
       TileLoWait => ppu.fetcher.state = TileLo,
       TileLo => {
         ppu.fetcher.state = TileHiWait;
 
+        // This unsigned value selects a tile from the memory area at $8000-$8FFF
         let tile_addr = 0x8000 | (ppu.fetcher.tile_id as u16 * 16);
-        let tile_data_addr = tile_addr + 2 * (ppu.fetcher.pixel_y % 8);
+        let tile_data_addr = tile_addr + 2 * ppu.fetcher.pixel_y;
         ppu.fetcher.tile_data_addr = tile_data_addr;
         self.ppu.fetcher.tile_data_lo = self.dispatch_read(tile_data_addr);
       },
@@ -355,13 +360,15 @@ impl Emu {
       Push => {
         ppu.fetcher.state = VramWait;
 
-        let obj = &ppu.obj_buf[obj_idx];
-        if obj.flip_x() {
+        let obj = &mut ppu.obj_buf[obj_idx];
+
+        // Be careful here, we need to push to deque in correct order (from left to right!)
+        if !obj.flip_x() {
           ppu.fetcher.tile_data_lo = ppu.fetcher.tile_data_lo.reverse_bits();
           ppu.fetcher.tile_data_hi = ppu.fetcher.tile_data_hi.reverse_bits();
         }
 
-        for i in (0..8).rev() {
+        for i in 0..8 {
           let color_lo = (ppu.fetcher.tile_data_lo >> i) & 1;
           let color_hi = (ppu.fetcher.tile_data_hi >> i) & 1;
           let color = (color_hi << 1) | color_lo;
@@ -372,9 +379,14 @@ impl Emu {
             .with_priority(obj.priority())
             .build();
 
-          ppu.obj_fifo.push_back(pixel_data);
+          match ppu.obj_fifo.get_mut(i) {
+            // If the target object pixel is not white and the pixel in the OAM FIFO is white, or if the pixel in the OAM FIFO has higher priority than the target object’s pixel, then the pixel in the OAM FIFO is replaced with the target object’s properties.
+            Some(pixel) => if pixel.color() == 0 { *pixel = pixel_data; }
+            None => ppu.obj_fifo.push_back(pixel_data),
+          }
         }
-
+        
+        obj.drawn = true;
         ppu.obj_to_fetch = None;
       }
     }
@@ -383,7 +395,7 @@ impl Emu {
   fn pixel_push(&mut self) {
     let ppu = &mut self.ppu;
 
-    if !ppu.bg_fifo.is_empty() && ppu.obj_to_fetch.is_none() {
+    if !ppu.bg_fifo.is_empty() && !ppu.is_fetching_objects {
       if ppu.fetcher.pixel_x < 0 {
         // discard pixel
         ppu.bg_fifo.pop_front();
@@ -393,9 +405,10 @@ impl Emu {
         let bg_pixel = ppu.bg_fifo.pop_front().unwrap();
         let obj_pixel = ppu.obj_fifo.pop_front().unwrap_or_default();
 
-        let bg_color = ppu.color_from_bg_palette(bg_pixel.color());
-        let obj_color = ppu.color_from_obj_palette(obj_pixel.palette(), obj_pixel.color());
+        let bg_color = ppu.color_from_bg_palette(bg_pixel.color()) * ppu.ctrl.bg_win_enable() as u8;
+        let obj_color = ppu.color_from_obj_palette(obj_pixel.palette(), obj_pixel.color()) * ppu.ctrl.obj_enable() as u8;
 
+        // TODO: object priority
         let final_color = if obj_color > 0 {
           obj_color
         } else {
