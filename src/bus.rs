@@ -1,4 +1,4 @@
-use crate::emu::Emu;
+use crate::{emu::Emu, ppu};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Handler {
@@ -52,8 +52,10 @@ impl Bus {
     let bootrom = include_bytes!("../bootroms/dmg_boot.bin");
 
     // we save the rom which is to be overlapped with the bootrom, and restore it later
-    let boot_sector = Some(rom[..256].to_vec());
-    rom[..256].copy_from_slice(bootrom);
+    // let boot_sector = Some(rom[..256].to_vec());
+    // rom[..256].copy_from_slice(bootrom);
+
+    let boot_sector = None;
 
     Self {
       handlers,
@@ -108,7 +110,7 @@ impl Emu {
       } else {
         self.inte.into_bits() | 0xe0
       }
-      Handler::OpenBus => 0xff,
+      Handler::OpenBus => 0xff, 
 
       Handler::Debug => bus.sram[addr],
     }
@@ -120,7 +122,7 @@ impl Emu {
 
     let handler = &bus.handlers[(addr as usize) >> 12];
     match handler {
-      Handler::Rom | Handler::OpenBus   => {}
+      Handler::Rom | Handler::OpenBus => {}
       Handler::Vram => bus.vram[addr - 0x8000] = val,
       Handler::Sram => bus.sram[addr - 0xa000] = val,
       Handler::Wram => bus.wram[addr - 0xc000] = val,
@@ -166,6 +168,13 @@ impl Emu {
     match addr {
       0xff00 => self.joypad.write(val),
       0xff40 => {
+        let new_ctrl = ppu::Ctrl::from_bits(val);
+        
+        // handle LCD enable/disable
+        if self.ppu.ctrl.lcd_enable() != new_ctrl.lcd_enable() {
+          if new_ctrl.lcd_enable() { self.lcd_set_enabled(); } else { self.lcd_set_disabled(); }
+        }
+        
         let ppu = &mut self.ppu;
         ppu.ctrl.set_bits(val);
         ppu.obj_size = if ppu.ctrl.obj_size() { 16 } else { 8 };
@@ -180,7 +189,7 @@ impl Emu {
       0xff43 => self.ppu.scx = val,
       0xff45 => {
         self.ppu.lyc = val;
-        self.handle_lyc_int();
+        self.handle_lyc();
       }
       0xff46 => {
         self.bus.dma.src = val;

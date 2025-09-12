@@ -63,7 +63,7 @@ impl Emu {
   pub fn new(bytes: Vec<u8>) -> Result<Self, String> {
     let header = CartHeader::parse(&bytes)?;
 
-    Ok(Self {
+    let mut emu = Self {
       cpu: CpuSM83::default(),
       ppu: Ppu::default(),
       bus: Bus::new(bytes, 0),
@@ -73,7 +73,12 @@ impl Emu {
       intf: Interrupt::default(),
       videobuf: [0; 160 * 144],
       frame_ready: false,
-    })
+    };
+
+    emu.cpu.pc = 0x100;
+    emu.lcd_set_disabled();
+
+    Ok(emu)
   }
 
 	pub(crate) fn tick(&mut self) {
