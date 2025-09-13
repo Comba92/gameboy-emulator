@@ -33,6 +33,15 @@ pub struct CpuSM83 {
 	halted: bool,
   pub mcycles: usize,
 }
+impl CpuSM83 {
+	pub fn new() -> Self {
+		let mut cpu = Self::default();
+		cpu.a = 0x1;
+    cpu.pc = 0x0100;
+		cpu.sp = 0xfffe;
+		cpu
+	}
+}
 
 impl Emu {
   fn set_carry(&mut self, val: u16) {
@@ -681,7 +690,7 @@ impl Emu {
 	fn ei(&mut self) { self.cpu.ei = true; }
 
 	fn stop(&mut self, _get: OpGet<u8>) {
-		todo!("stop")
+		// TODO
 	}
 
 	fn halt(&mut self) {

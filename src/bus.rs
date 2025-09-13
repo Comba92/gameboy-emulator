@@ -5,11 +5,19 @@ pub(crate) enum Handler {
   Rom, Vram, Sram, Wram, IO, OpenBus, Debug
 }
 
-#[derive(Default)]
 struct Dma {
   src: u8,
   transfering: bool,
   count: u8,
+}
+impl Default for Dma {
+  fn default() -> Self {
+    Self {
+      src: 0xff,
+      transfering: false,
+      count: 0,
+    }
+  }
 }
 
 pub(crate) struct Bus {
@@ -51,7 +59,7 @@ impl Bus {
     // TODO: dynamic bootrom load
     let bootrom = include_bytes!("../bootroms/dmg_boot.bin");
 
-    // we save the rom which is to be overlapped with the bootrom, and restore it later
+    // // we save the rom which is to be overlapped with the bootrom, and restore it later
     // let boot_sector = Some(rom[..256].to_vec());
     // rom[..256].copy_from_slice(bootrom);
 
@@ -147,6 +155,16 @@ impl Emu {
   fn handle_io_read(&mut self, addr: usize) -> u8 {
     match addr {
       0xff00 => self.joypad.read(),
+      0xff01 => 0,
+      0xff02 => self.serial.into_bits(),
+
+      0xff04 => (self.timer.div >> 8) as u8,
+      0xff05 => self.timer.tima,
+      0xff06 => self.timer.tma,
+      0xff07 => self.timer.tac,
+
+      0xff0f => self.intf.into_bits() | 0xe0,
+
       0xff40 => self.ppu.ctrl.into_bits(),
       0xff41 => self.ppu.stat.into_bits(),
       0xff42 => self.ppu.scy,
@@ -159,7 +177,7 @@ impl Emu {
       0xff49 => self.ppu.obp1,
       0xff4a => self.ppu.wy,
       0xff4b => self.ppu.wx,
-      0xff0f => self.intf.into_bits() | 0xe0,
+
       _ => 0xff
     }
   }
@@ -167,6 +185,23 @@ impl Emu {
   fn handle_io_write(&mut self, addr: usize, val: u8) {
     match addr {
       0xff00 => self.joypad.write(val),
+      0xff02 => self.serial.set_bits(val),
+
+      0xff04 => self.timer.div = 0,
+      0xff05 => self.timer.tima = val,
+      0xff06 => self.timer.tma = val,
+      0xff07 => {
+        self.timer.tac = 0xf8 | (val & 0x7);
+        self.timer.clock_mask = match val & 0x3 {
+          0 => 255,
+          1 => 3,
+          2 => 15,
+          _ => 63
+        };
+      }
+
+      0xff0f => self.intf.set_bits(val),
+
       0xff40 => {
         let new_ctrl = ppu::Ctrl::from_bits(val);
         
@@ -176,7 +211,7 @@ impl Emu {
         }
         
         let ppu = &mut self.ppu;
-        ppu.ctrl.set_bits(val);
+        ppu.ctrl = new_ctrl;
         ppu.obj_size = if ppu.ctrl.obj_size() { 16 } else { 8 };
         ppu.bg_tilemap  = if ppu.ctrl.bg_tilemap() { 0x9c00 } else { 0x9800 };
         ppu.win_tilemap = if ppu.ctrl.win_tileamp() { 0x9c00 } else { 0x9800 };
@@ -184,24 +219,30 @@ impl Emu {
       0xff41 => {
         let stat = self.ppu.stat.into_bits();
         self.ppu.stat.set_bits((val & 0b0111_1000) | (stat & 0b1000_0111));
+        self.handle_stat_int();
       }
       0xff42 => self.ppu.scy = val,
       0xff43 => self.ppu.scx = val,
       0xff45 => {
         self.ppu.lyc = val;
-        self.handle_lyc();
+        if self.ppu.ctrl.lcd_enable() {
+          self.handle_lyc();
+        }
       }
       0xff46 => {
         self.bus.dma.src = val;
         self.bus.dma.transfering = true;
         self.bus.dma.count = 0;
       }
-      0xff47 => self.ppu.bgp = val,
+      0xff47 => {
+        self.ppu.bgp = val;
+        dbg!(self.ppu.bgp);
+      }
       0xff48 => self.ppu.obp0 = val,
       0xff49 => self.ppu.obp1 = val,
       0xff4a => self.ppu.wy = val,
       0xff4b => self.ppu.wx = val,
-      0xff0f => self.intf.set_bits(val),
+
       0xff50 => if let Some(boot_sector) = self.bus.boot_sector.take() {
         self.bus.rom[..256].copy_from_slice(&boot_sector);
       }

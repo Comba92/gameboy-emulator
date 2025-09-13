@@ -76,6 +76,12 @@ impl Fetcher {
     *self = Self::default();
     self.pixel_x = -(8 + (scx as i16 % 8));
   }
+
+  fn get_color_at(&self, column: u8) -> u8 {
+    let color_lo = (self.tile_data_lo >> column) & 1;
+    let color_hi = (self.tile_data_hi >> column) & 1;
+    (color_hi << 1) | color_lo
+  }
 }
 
 struct Sprite {
@@ -119,19 +125,34 @@ pub struct Ppu {
   fetcher: Fetcher,
 
   win_ly: u8,
-  is_window_in_scanline: bool,
+  is_window_scanline_reached: bool,
   is_fetching_window: bool,
   bg_fifo: VecDeque<PixelData>,
 
   is_fetching_objects: bool,
-  obj_to_fetch: Option<usize>,
+  obj_fetching: Option<usize>,
   obj_visible_buf: Vec<Sprite>,
   obj_fifo: VecDeque<PixelData>,
   
   mode: Mode,
+  stat_intf: bool, 
   dots: u16,
 }
 impl Ppu {
+  pub fn new() -> Self {
+    let mut ppu = Self::default();
+    ppu.ctrl.set_lcd_enable(true);
+    ppu.ctrl.set_bg_win_enable(true);
+    ppu.ctrl.set_tileset_mode(true);
+    ppu.stat.set_ppu_mode(1);
+    ppu.bgp = 0xfc;
+    ppu.bg_tilemap = 0x9800;
+    ppu.win_tilemap = 0x9800;
+    ppu.obj_size = 8;
+
+    ppu
+  }
+
   pub(crate) fn tileset_addr(&self, tile_number: u8) -> u16 {
     if self.ctrl.tileset_mode() {
       // unsigned mode
@@ -167,12 +188,13 @@ impl Ppu {
     self.obj_fifo.clear();
     self.is_fetching_window = false;
     self.is_fetching_objects = false;
-    self.obj_to_fetch = None;
+    self.obj_fetching = None;
   }
 }
 
 impl Emu {
   pub(crate) fn lcd_set_enabled(&mut self) {
+    self.ppu.dots = 0;
     self.enter_mode2();
     self.handle_lyc();
   }
@@ -183,21 +205,9 @@ impl Emu {
     ppu.dots = 0;
     ppu.ly = 0;
     ppu.lyc = 0;
+    // PPU Stat mode reports 0 instead when the PPU is disabled.
     ppu.stat.set_ppu_mode(0);
-
     self.videobuf.fill(0);
-  }
-
-  fn enter_mode2(&mut self) {
-    // The scroll registers are re-read on each tile fetch, except for the low 3 bits of SCX, which are only read at the beginning of the scanline (for the initial shifting of pixels).
-    self.ppu.reset();
-    self.ppu.dots = 0;
-
-    self.ppu.mode = Mode::OamScan;
-    self.ppu.stat.set_ppu_mode(self.ppu.mode as u8);
-    if self.ppu.stat.mode2_int() {
-      self.intf.set_lcd(true);
-    }
   }
 
   pub(crate) fn ly_increase(&mut self) {
@@ -207,28 +217,58 @@ impl Emu {
     self.handle_lyc();
   }
 
+  pub(crate) fn handle_stat_int(&mut self) {
+    let stat = &self.ppu.stat;
+    let new_int = (stat.lyc_eq_ly() && stat.lyc_int())
+      || (stat.ppu_mode() == 0 && stat.mode0_int())
+      || (stat.ppu_mode() == 1 && stat.mode1_int())
+      || (stat.ppu_mode() == 2 && stat.mode2_int());
+
+    if !self.ppu.stat_intf && new_int {
+      self.intf.set_lcd(true);
+    }
+
+    self.ppu.stat_intf = new_int;
+  }
+
+  fn enter_mode2(&mut self) {
+    // The scroll registers are re-read on each tile fetch, except for the low 3 bits of SCX, which are only read at the beginning of the scanline (for the initial shifting of pixels).
+    self.ppu.reset();
+    self.ppu.dots = 0;
+
+    self.ppu.mode = Mode::OamScan;
+    self.ppu.stat.set_ppu_mode(2);
+    if self.ppu.stat.mode2_int() {
+      self.intf.set_lcd(true);
+    }
+    // self.handle_stat_int();
+  }
+
   pub(crate) fn handle_lyc(&mut self) {
     let ppu = &mut self.ppu;
     ppu.stat.set_lyc_eq_ly(ppu.ly == ppu.lyc);
     if ppu.stat.lyc_eq_ly() && ppu.stat.lyc_int() {
       self.intf.set_lcd(true);
     }
+    // self.handle_stat_int();
   }
 
   fn enter_hblank(&mut self) {
     self.ppu.mode = Mode::Hblank;
-    self.ppu.stat.set_ppu_mode(self.ppu.mode as u8);
+    self.ppu.stat.set_ppu_mode(0);
     if self.ppu.stat.mode0_int() {
       self.intf.set_lcd(true);
     }
+    // self.handle_stat_int();
   }
 
   fn enter_vblank(&mut self) {
     self.ppu.mode = Mode::Vblank;
-    self.ppu.stat.set_ppu_mode(self.ppu.mode as u8);
+    self.ppu.stat.set_ppu_mode(1);
     if self.ppu.stat.mode1_int() {
       self.intf.set_lcd(true);
     }
+    // self.handle_stat_int();
 
     self.intf.set_vblank(true);
     self.frame_ready = true;
@@ -259,13 +299,13 @@ impl Emu {
   fn drawing_step(&mut self) {
     let ppu = &mut self.ppu;
 
-    if ppu.obj_to_fetch.is_none() {
+    if ppu.obj_fetching.is_none() {
       if let Some(obj) = ppu.obj_visible_buf.iter()
         .position(|s| !s.drawn && s.x as i16 == ppu.fetcher.pixel_x + 8)
       {
         ppu.is_fetching_objects = true;
         ppu.fetcher.state = FetcherState::default();
-        ppu.obj_to_fetch = Some(obj);
+        ppu.obj_fetching = Some(obj);
       } else {
         ppu.is_fetching_objects = false;
       }
@@ -273,7 +313,7 @@ impl Emu {
 
     if !ppu.is_fetching_window {
       let is_window_first_tile = ppu.ctrl.win_enable()
-        && ppu.is_window_in_scanline
+        && ppu.is_window_scanline_reached
         && ppu.fetcher.pixel_x + 7 == ppu.wx as i16;
 
       if is_window_first_tile {
@@ -286,7 +326,7 @@ impl Emu {
       }
     }
 
-    match ppu.obj_to_fetch {
+    match ppu.obj_fetching {
       Some(obj_idx) => self.fetch_obj(obj_idx),
       None => self.fetch_bg(),
     }
@@ -310,16 +350,14 @@ impl Emu {
             let tile_x = (ppu.fetcher.tile_count as u16 + ppu.scx as u16 / 8) % 32;
             ppu.fetcher.pixel_y = ppu.ly as u16 + ppu.scy as u16;
             let tile_y = 32 * ((ppu.fetcher.pixel_y % 256) / 8);
-            let tile_offset = tile_y + tile_x;
-            ppu.bg_tilemap + (tile_offset % 1024)
+            ppu.bg_tilemap + ((tile_y + tile_x) % 1024)
           }
           true => {
             // window
             let tile_x = ppu.fetcher.tile_count as u16;
             ppu.fetcher.pixel_y = ppu.win_ly as u16;
             let tile_y = 32 * (ppu.fetcher.pixel_y / 8);
-            let tile_offset = tile_y + tile_x;
-            ppu.win_tilemap + (tile_offset % 1024)
+            ppu.win_tilemap + ((tile_y + tile_x) % 1024)
           }
         };
 
@@ -354,9 +392,7 @@ impl Emu {
         }
 
         for i in (0..8).rev() {
-          let color_lo = (ppu.fetcher.tile_data_lo >> i) & 1;
-          let color_hi = (ppu.fetcher.tile_data_hi >> i) & 1;
-          let color = (color_hi << 1) | color_lo;
+          let color = ppu.fetcher.get_color_at(i);
 
           let pixel_data = PixelDataBuilder::new()
             .with_color(color)
@@ -376,8 +412,8 @@ impl Emu {
       VramWait => ppu.fetcher.state = Vram,
       Vram => {
         ppu.fetcher.state = TileLoWait;
-
         let obj = &mut ppu.obj_visible_buf[obj_idx];
+
         // In 8×16 mode (LCDC bit 2 = 1), the memory area at $8000-$8FFF is still interpreted as a series of 8×8 tiles, where every 2 tiles form an object.
         ppu.fetcher.pixel_y = if obj.flip_y() { ppu.obj_size - 1 - obj.tile_row } else { obj.tile_row } as u16;
         // In 8×16 mode, the least significant bit of the tile index is ignored;
@@ -405,19 +441,17 @@ impl Emu {
 
       Push => {
         ppu.fetcher.state = VramWait;
-
         let obj = &mut ppu.obj_visible_buf[obj_idx];
 
         // Be careful here, we need to push to deque in correct order (from left to right!)
+        // pixel bits are reversed in memory. so we reverse them if we dont have flip_x. 
         if !obj.flip_x() {
           ppu.fetcher.tile_data_lo = ppu.fetcher.tile_data_lo.reverse_bits();
           ppu.fetcher.tile_data_hi = ppu.fetcher.tile_data_hi.reverse_bits();
         }
 
         for i in 0..8 {
-          let color_lo = (ppu.fetcher.tile_data_lo >> i) & 1;
-          let color_hi = (ppu.fetcher.tile_data_hi >> i) & 1;
-          let color = (color_hi << 1) | color_lo;
+          let color = ppu.fetcher.get_color_at(i);
 
           let pixel_data = PixelDataBuilder::new()
             .with_color(color)
@@ -425,15 +459,16 @@ impl Emu {
             .with_priority(obj.priority())
             .build();
 
-          match ppu.obj_fifo.get_mut(i) {
+          match ppu.obj_fifo.get_mut(i as usize) {
             // If the target object pixel is not white and the pixel in the OAM FIFO is white, or if the pixel in the OAM FIFO has higher priority than the target object’s pixel, then the pixel in the OAM FIFO is replaced with the target object’s properties.
             Some(pixel) => if pixel.color() == 0 { *pixel = pixel_data; }
             None => ppu.obj_fifo.push_back(pixel_data),
           }
         }
         
+        // set this object as drawn (so we don't check for it next time we iterate)
         obj.drawn = true;
-        ppu.obj_to_fetch = None;
+        ppu.obj_fetching = None;
       }
     }
   }
@@ -449,6 +484,7 @@ impl Emu {
       } else {
         // push pixel to framebuffer
         let bg_pixel = ppu.bg_fifo.pop_front().unwrap();
+        // if we don't have anything in object fifo, we simply use an all zeros pixel
         let obj_pixel = ppu.obj_fifo.pop_front().unwrap_or_default();
 
         let bg_color = ppu.color_from_bg_palette(bg_pixel.color()) * ppu.ctrl.bg_win_enable() as u8;
@@ -477,12 +513,12 @@ impl Emu {
       Mode::OamScan => {
         // WY condition was triggered: i.e. at some point in this frame the value of WY was equal to LY (checked at the start of Mode 2 only)
         if ppu.dots-1 == 0 && ppu.ctrl.win_enable() && ppu.ly == ppu.wy {
-          ppu.is_window_in_scanline = true;
+          ppu.is_window_scanline_reached = true;
         }
 
         if ppu.dots >= 80 {
           ppu.mode = Mode::Drawing;
-          ppu.stat.set_ppu_mode(ppu.mode as u8);
+          ppu.stat.set_ppu_mode(3);
 
           // we do oam scan all in one go
           self.oam_scan();
@@ -518,12 +554,24 @@ impl Emu {
         if ppu.ly >= 154 {
           ppu.ly = 0;
           ppu.win_ly = 0;
-          ppu.is_window_in_scanline = false;
+          ppu.is_window_scanline_reached = false;
           self.enter_mode2();
         }
       }
 
-      Mode::Disabled => {}
+      Mode::Disabled => {
+        // if ppu.dots >= 456 {
+        //   ppu.dots = 0;
+        //   ppu.ly += 1;
+
+        //   if ppu.ly == 144 {
+        //     self.intf.set_vblank(true);
+        //     self.frame_ready = true;
+        //   } else if ppu.ly >= 154 {
+        //     ppu.ly = 0;
+        //   }
+        // }
+      }
     }
   }
 }

@@ -6,6 +6,7 @@ pub(crate) struct CartHeader {
   mapper: u8,
   rom_size: usize,
   ram_size: usize,
+  has_battery: bool,
   sgb_mode: bool,
   cgb_mode: CGBMode,
   region: Region,

@@ -5,21 +5,20 @@ use sdl2::{event::Event, keyboard::Keycode};
 
 fn load_rom(path: &str) -> Result<Emu, Box<dyn std::error::Error>> {
     let mut bytes = Vec::new();
-    let mut file = std::fs::File::open(path)?;
+    let file = std::fs::File::open(path)?;
+    let mut reader = BufReader::new(&file);
 
-    BufReader::new(&file).read_to_end(&mut bytes)
+    _ = zip::read::ZipArchive::new(&mut reader)
+        .map_err(|e| e.into())
+        .and_then(|mut archive| {
+            archive.by_index(0)
+            .map_err(|e| e.into())
+            .and_then(|mut zip| {
+                zip.read_to_end(&mut bytes)
+            })
+        })
         .or_else(|_| {
-            file.rewind().and_then(|_|
-                zip::read::ZipArchive::new(BufReader::new(&file))
-                .map_err(|e| e.into())
-                .and_then(|mut archive| {
-                    archive.by_index(0)
-                    .map_err(|e| e.into())
-                    .and_then(|mut zip| {
-                        zip.read_to_end(&mut bytes)
-                    })
-                })
-            )
+            reader.rewind().and_then(|_| reader.read_to_end(&mut bytes))
         })?;
 
     Emu::new(bytes).map_err(|e| e.into())
@@ -84,8 +83,8 @@ fn main() {
                     if let Some(keycode) = keycode {
                         match keycode {
                             Keycode::W => emu.btn_released(joypad::UP),
-                            Keycode::A => emu.btn_released(joypad::LEFT),
                             Keycode::S => emu.btn_released(joypad::DOWN),
+                            Keycode::A => emu.btn_released(joypad::LEFT),
                             Keycode::D => emu.btn_released(joypad::RIGHT),
                             Keycode::K => emu.btn_released(joypad::A),
                             Keycode::J => emu.btn_released(joypad::B),
