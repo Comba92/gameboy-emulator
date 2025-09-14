@@ -32,6 +32,8 @@ pub struct CpuSM83 {
 
 	halted: bool,
   pub mcycles: usize,
+	// TODO: used for debug only, consider REMOVING
+	pub instr_count: usize,
 }
 impl CpuSM83 {
 	pub fn new() -> Self {
@@ -39,6 +41,13 @@ impl CpuSM83 {
 		cpu.a = 0x1;
     cpu.pc = 0x0100;
 		cpu.sp = 0xfffe;
+
+		// cpu.bc.set_lo(19);
+		// cpu.de.set_lo(216);
+		// cpu.hl.set_hi(1);
+		// cpu.hl.set_lo(77);
+		// cpu.f.0 = 176;
+
 		cpu
 	}
 }
@@ -71,6 +80,7 @@ impl Emu {
 	}
 
 	pub fn cpu_step(&mut self) {
+		self.cpu.instr_count += 1;
 		self.handle_interrupts();
 		if self.cpu.ei {
 			self.cpu.ime = true;
@@ -85,19 +95,18 @@ impl Emu {
 		self.decode_n_execute(opcode);
 	}
 
-	fn handle_interrupts(&mut self) -> bool {
+	fn handle_interrupts(&mut self) {
 		let inte = self.inte.into_bits();
 		let intf = self.intf.into_bits();
 
 		if !self.cpu.ime {
 			// If IME is not set, there are two distinct cases, depending on whether an interrupt is pending as the halt instruction is first executed.
-			
 			// If no interrupt is pending, halt executes as normal, and the CPU resumes regular execution as soon as an interrupt becomes pending. However, since IME=0, the interrupt is not handled.
 			if inte & intf & 0x1f > 0 {
 				self.cpu.halted = false;
 			}
 
-			return false;
+			return;
 		}
 
 		for bit in 0..5 {
@@ -114,13 +123,10 @@ impl Emu {
 				self.tick();
 
 				// we can easily get the ISR (0x40, 048, 0x50, 0x58, 0x60) like this
-				let isr = 0x40 | (bit << 3);
+				let isr = 0x40 | (bit << 3);				
 				self.rst(isr);
-				return true;
 			}
 		}
-
-		return false;
 	}
 
   fn read8(&mut self, addr: u16) -> u8 {
@@ -137,8 +143,8 @@ impl Emu {
 	}
 	fn write16(&mut self, addr: u16, val: u16){
 		let [lo, hi] = val.to_le_bytes();
-		self.write8(addr as u16, lo);
-		self.write8(addr.wrapping_add(1) as u16, hi);
+		self.write8(addr, lo);
+		self.write8(addr.wrapping_add(1), hi);
 	}
 	fn pc_fetch(&mut self) -> u8 {
 		let res = self.read8(self.cpu.pc);
@@ -146,9 +152,9 @@ impl Emu {
 		res
 	}
 	fn pc_fetch16(&mut self) -> u16 {
-		u16::from_le_bytes([
-			self.pc_fetch(), self.pc_fetch()
-		])
+		let hi = self.pc_fetch();
+		let lo = self.pc_fetch();
+		u16::from_le_bytes([hi, lo])
 	}
 
 	fn stack_push(&mut self, val: u16) {
@@ -179,7 +185,6 @@ impl Emu {
 	}
 
 	fn a(&mut self) -> u8 { self.cpu.a }
-	fn a16(&mut self) -> u16 { self.cpu.a as u16 }
 	fn b(&mut self) -> u8 { self.cpu.bc.hi() }
 	fn c(&mut self) -> u8 { self.cpu.bc.lo() }
 	fn c_indirect(&mut self) -> u8 {
@@ -215,6 +220,10 @@ impl Emu {
 	fn set_indirect_zero8(&mut self, val: u8) {
 		let offset = self.pc_fetch();
 		self.write8(self.hram(offset), val);
+	}
+	fn set_indirect_abs8(&mut self, val: u8) {
+		let addr = self.pc_fetch16();
+		self.write8(addr, val);
 	}
 	fn set_indirect_abs16(&mut self, val: u16) {
 		let addr = self.pc_fetch16();
@@ -944,7 +953,7 @@ impl Emu {
 			0xE7 => self.rst(0x20),
 			0xE8 => self.addsp(Self::immediate8),
 			0xE9 => self.jphl(),
-			0xEA => self.ld(Self::set_indirect_abs16,Self::a16),
+			0xEA => self.ld(Self::set_indirect_abs8,Self::a),
 			0xEE => self.xor(Self::immediate8),
 			0xEF => self.rst(0x28),
 			0xF0 => self.ld(Self::set_a,Self::indirect_zero8),

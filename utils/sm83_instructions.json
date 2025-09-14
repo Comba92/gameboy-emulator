@@ -4738,7 +4738,7 @@
       "name": "LD",
       "opcode": 234,
       "opcode_hex": "0xEA",
-      "get": "a16",
+      "get": "A",
       "set": "absolute_address",
       "special": "none",
       "size_bytes": 3,
