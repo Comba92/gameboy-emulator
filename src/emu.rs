@@ -71,10 +71,14 @@ impl Emu {
     let header = CartHeader::parse(&bytes)?;
     let mbc = Mbc::new(header.mapper)?;
 
-    let mut emu = Self {
+    // TODO: sram should be disabled by default, except for no mbc games
+    let mut bus = Bus::new(bytes, header.ram_size);
+    mbc.init(&mut bus);
+
+    let emu = Self {
       cpu: CpuSM83::new(),
       ppu: Ppu::new(),
-      bus: Bus::new(bytes, header.ram_size),
+      bus,
       joypad: Joypad::default(),
       serial: Serial::default(),
       timer: Timer::default(),
@@ -85,16 +89,6 @@ impl Emu {
       intf: Interrupt::default(),
       videobuf: [0; 160 * 144],
       frame_ready: false,
-    };
-
-    match &emu.mbc {
-      Mbc::MBC1(mbc1) => {
-        mbc1.update_banks(&mut emu.bus);
-        emu.bus.sram_enable(false);
-      }
-      Mbc::None => {
-        emu.bus.rom_banks.set_page(1, 1);
-      }
     };
 
     Ok(emu)
@@ -129,10 +123,15 @@ impl Emu {
     }
   }
 
+  fn serial_step(&mut self) {
+    // TODO: CGB transfer speed
+
+  }
+
 	pub(crate) fn tick(&mut self) {
 		self.cpu.mcycles += 1;
+    
     self.dma_step();
-
     self.timer_step();
     
 		self.ppu_step();
