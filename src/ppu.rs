@@ -74,7 +74,7 @@ impl Default for Fetcher {
 impl Fetcher {
   fn reset(&mut self, scx: u8) {
     *self = Self::default();
-    self.pixel_x = -(8 + (scx as i16 % 8));
+    self.pixel_x = -(8 + (scx % 8) as i16);
   }
 
   fn get_color_at(&self, column: u8) -> u8 {
@@ -100,7 +100,7 @@ impl Sprite {
   fn dmg_palette(&self) -> bool { self.attributes & 0x10 > 0 }
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, PartialEq)]
 enum Mode {
   #[default] OamScan = 2, Drawing = 3, Hblank = 0, Vblank = 1, Disabled = 4
 }
@@ -135,8 +135,8 @@ pub struct Ppu {
   obj_fifo: VecDeque<PixelData>,
   
   mode: Mode,
-  stat_intf: bool, 
-  dots: u16,
+  stat_int_line: bool, 
+  pub(crate) dots: u16,
 }
 impl Ppu {
   pub fn new() -> Self {
@@ -157,7 +157,7 @@ impl Ppu {
     if self.ctrl.tileset_mode() {
       // unsigned mode
       let offset = tile_number as u16 * 16;
-      0x8000 | offset
+      0x8000 + offset
     } else {
       // signed mode
       let tile_number = tile_number as i8 as i16;
@@ -204,17 +204,28 @@ impl Emu {
     ppu.mode = Mode::Disabled;
     ppu.dots = 0;
     ppu.ly = 0;
-    ppu.lyc = 0;
+
     // PPU Stat mode reports 0 instead when the PPU is disabled.
     ppu.stat.set_ppu_mode(0);
     self.videobuf.fill(0);
+    // self.bus.vram_enable(true);
+    // self.bus.oam_enable = true;
   }
 
   pub(crate) fn ly_increase(&mut self) {
     let ppu = &mut self.ppu;
     ppu.dots = 0;
-    ppu.ly += 1;
-    self.handle_lyc();
+    self.ppu.ly += 1;
+    // self.handle_lyc();
+  }
+
+  pub(crate) fn handle_lyc(&mut self) {
+    let ppu = &mut self.ppu;
+    ppu.stat.set_lyc_eq_ly(ppu.ly == ppu.lyc);
+    // if ppu.stat.lyc_eq_ly() && ppu.stat.lyc_int() {
+      //   self.intf.set_lcd(true);
+      // }
+    self.handle_stat_int();
   }
 
   pub(crate) fn handle_stat_int(&mut self) {
@@ -224,11 +235,11 @@ impl Emu {
       || (stat.ppu_mode() == 1 && stat.mode1_int())
       || (stat.ppu_mode() == 2 && stat.mode2_int());
 
-    if !self.ppu.stat_intf && new_int {
+    if !self.ppu.stat_int_line && new_int {
       self.intf.set_lcd(true);
     }
 
-    self.ppu.stat_intf = new_int;
+    self.ppu.stat_int_line = new_int;
   }
 
   fn enter_mode2(&mut self) {
@@ -238,37 +249,43 @@ impl Emu {
 
     self.ppu.mode = Mode::OamScan;
     self.ppu.stat.set_ppu_mode(2);
-    if self.ppu.stat.mode2_int() {
-      self.intf.set_lcd(true);
-    }
-    // self.handle_stat_int();
+
+    // if self.ppu.stat.mode2_int() {
+    //   self.intf.set_lcd(true);
+    // }
+    self.handle_stat_int();
+    
+    // self.bus.oam_enable = false;
   }
 
-  pub(crate) fn handle_lyc(&mut self) {
+  fn enter_mode3(&mut self) {
     let ppu = &mut self.ppu;
-    ppu.stat.set_lyc_eq_ly(ppu.ly == ppu.lyc);
-    if ppu.stat.lyc_eq_ly() && ppu.stat.lyc_int() {
-      self.intf.set_lcd(true);
-    }
+    ppu.mode = Mode::Drawing;
+    ppu.stat.set_ppu_mode(3);
     // self.handle_stat_int();
+
+    // self.bus.vram_enable(false);
   }
 
   fn enter_hblank(&mut self) {
     self.ppu.mode = Mode::Hblank;
     self.ppu.stat.set_ppu_mode(0);
-    if self.ppu.stat.mode0_int() {
-      self.intf.set_lcd(true);
-    }
-    // self.handle_stat_int();
+    // if self.ppu.stat.mode0_int() {
+    //   self.intf.set_lcd(true);
+    // }
+    self.handle_stat_int();
+
+    // self.bus.vram_enable(true);
+    // self.bus.oam_enable = true;
   }
 
   fn enter_vblank(&mut self) {
     self.ppu.mode = Mode::Vblank;
     self.ppu.stat.set_ppu_mode(1);
-    if self.ppu.stat.mode1_int() {
-      self.intf.set_lcd(true);
-    }
-    // self.handle_stat_int();
+    // if self.ppu.stat.mode1_int() {
+    //   self.intf.set_lcd(true);
+    // }
+    self.handle_stat_int();
 
     self.intf.set_vblank(true);
     self.frame_ready = true;
@@ -361,7 +378,8 @@ impl Emu {
           }
         };
 
-        self.ppu.fetcher.tile_id = self.dispatch_read(vram_addr);
+        // self.ppu.fetcher.tile_id = self.dispatch_read(vram_addr);
+        self.ppu.fetcher.tile_id = self.bus.vram[vram_addr as usize - 0x8000];
       }
 
       TileLoWait => ppu.fetcher.state = TileLo,
@@ -371,7 +389,8 @@ impl Emu {
         let tile_addr = ppu.tileset_addr(ppu.fetcher.tile_id);
         let tile_data_addr = tile_addr + 2 * (ppu.fetcher.pixel_y % 8);
         ppu.fetcher.tile_data_addr = tile_data_addr;
-        self.ppu.fetcher.tile_data_lo = self.dispatch_read(tile_data_addr);
+        // self.ppu.fetcher.tile_data_lo = self.dispatch_read(tile_data_addr);
+        self.ppu.fetcher.tile_data_lo = self.bus.vram[tile_data_addr as usize - 0x8000];
       },
 
       TileHiWait => ppu.fetcher.state = TileHi,
@@ -379,7 +398,8 @@ impl Emu {
         ppu.fetcher.state = Push;
 
         let tile_data_addr = ppu.fetcher.tile_data_addr + 1;
-        self.ppu.fetcher.tile_data_hi = self.dispatch_read(tile_data_addr);
+        // self.ppu.fetcher.tile_data_hi = self.dispatch_read(tile_data_addr);
+        self.ppu.fetcher.tile_data_hi = self.bus.vram[tile_data_addr as usize - 0x8000];
       },
 
       Push => if ppu.bg_fifo.is_empty() {
@@ -428,7 +448,8 @@ impl Emu {
         let tile_addr = 0x8000 | (ppu.fetcher.tile_id as u16 * 16);
         let tile_data_addr = tile_addr + 2 * ppu.fetcher.pixel_y;
         ppu.fetcher.tile_data_addr = tile_data_addr;
-        self.ppu.fetcher.tile_data_lo = self.dispatch_read(tile_data_addr);
+        // self.ppu.fetcher.tile_data_lo = self.dispatch_read(tile_data_addr);
+        self.ppu.fetcher.tile_data_lo = self.bus.vram[tile_data_addr as usize - 0x8000];
       },
 
       TileHiWait => ppu.fetcher.state = TileHi,
@@ -436,7 +457,8 @@ impl Emu {
         ppu.fetcher.state = Push;
 
         let tile_data_addr = ppu.fetcher.tile_data_addr + 1;
-        self.ppu.fetcher.tile_data_hi = self.dispatch_read(tile_data_addr);
+        // self.ppu.fetcher.tile_data_hi = self.dispatch_read(tile_data_addr);
+        self.ppu.fetcher.tile_data_hi = self.bus.vram[tile_data_addr as usize - 0x8000];
       },
 
       Push => {
@@ -487,13 +509,10 @@ impl Emu {
         // if we don't have anything in object fifo, we simply use an all zeros pixel
         let obj_pixel = ppu.obj_fifo.pop_front().unwrap_or_default();
 
-        let bg_color = ppu.color_from_bg_palette(bg_pixel.color()) * ppu.ctrl.bg_win_enable() as u8;
-        let obj_color = ppu.color_from_obj_palette(obj_pixel.palette(), obj_pixel.color()) * ppu.ctrl.obj_enable() as u8;
-
-        let final_color = if obj_color > 0 && (!obj_pixel.priority() || bg_color == 0) {
-          obj_color
+        let final_color = if ppu.ctrl.obj_enable() && obj_pixel.color() > 0 && (!obj_pixel.priority() || bg_pixel.color() == 0) {
+          ppu.color_from_obj_palette(obj_pixel.palette(), obj_pixel.color())
         } else {
-          bg_color
+          ppu.color_from_bg_palette(bg_pixel.color()) * ppu.ctrl.bg_win_enable() as u8
         };
 
         let idx = (ppu.ly as usize * 160) + ppu.fetcher.pixel_x as usize;
@@ -507,19 +526,17 @@ impl Emu {
   pub(crate) fn ppu_step(&mut self) {
     let ppu = &mut self.ppu;
     // we increase it early, and transition to the next state now; next state will be handled next step
-    ppu.dots += 1;
+    ppu.dots = ppu.dots.wrapping_add(1);
 
     match ppu.mode {
       Mode::OamScan => {
         // WY condition was triggered: i.e. at some point in this frame the value of WY was equal to LY (checked at the start of Mode 2 only)
-        if ppu.dots-1 == 0 && ppu.ctrl.win_enable() && ppu.ly == ppu.wy {
+        if ppu.dots == 1 && ppu.ly == ppu.wy {
           ppu.is_window_scanline_reached = true;
         }
 
         if ppu.dots >= 80 {
-          ppu.mode = Mode::Drawing;
-          ppu.stat.set_ppu_mode(3);
-
+          self.enter_mode3();
           // we do oam scan all in one go
           self.oam_scan();
         }
@@ -540,10 +557,10 @@ impl Emu {
           ppu.win_ly += 1;
         }
 
-        if ppu.ly >= 144 {
-          self.enter_vblank();
-        } else {
+        if ppu.ly < 144 {
           self.enter_mode2();
+        } else {
+          self.enter_vblank();
         }
       }
 
@@ -565,7 +582,6 @@ impl Emu {
         //   ppu.ly += 1;
 
         //   if ppu.ly == 144 {
-        //     self.intf.set_vblank(true);
         //     self.frame_ready = true;
         //   } else if ppu.ly >= 154 {
         //     ppu.ly = 0;
@@ -573,5 +589,7 @@ impl Emu {
         // }
       }
     }
+
+    self.handle_lyc();
   }
 }

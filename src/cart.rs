@@ -2,19 +2,19 @@ use crate::emu::CGBMode;
 
 #[derive(Debug, Default)]
 pub(crate) struct CartHeader {
-  title: String,
-  mapper: u8,
-  rom_size: usize,
-  ram_size: usize,
-  has_battery: bool,
-  sgb_mode: bool,
-  cgb_mode: CGBMode,
-  region: Region,
-  version: u8,
+  pub title: String,
+  pub mapper: u8,
+  pub rom_size: usize,
+  pub ram_size: usize,
+  pub has_battery: bool,
+  pub sgb_mode: bool,
+  pub cgb_mode: CGBMode,
+  pub region: Region,
+  pub version: u8,
 }
 
 #[derive(Debug, Default)]
-enum Region { Japan, #[default] Overseas }
+pub(crate) enum Region { Japan, #[default] Overseas }
 
 impl CartHeader {
   pub fn parse(bytes: &[u8]) -> Result<Self, &'static str> {
@@ -34,6 +34,7 @@ impl CartHeader {
     };
     header.sgb_mode = bytes[0x146] == 0x3;
     header.mapper = bytes[0x147];
+    header.has_battery = [0x3, 0x6, 0x9, 0xd, 0xf, 0x10, 0x13, 0x1b, 0x1e, 0x22, 0xff].contains(&header.mapper);
     header.rom_size = 32 * 1024 * (1 << bytes[0x148]); 
     header.ram_size = 1024 * match bytes[0x149] {
       2 => 8,

@@ -1,4 +1,4 @@
-use crate::emu::Emu;
+use crate::emu::{Emu, Interrupt};
 use std::ops::{BitAnd, BitOr, BitXor, Not, Shl, Shr};
 
 #[bitfields::bitfield(u16)]
@@ -114,17 +114,18 @@ impl Emu {
 			if inte & intf & mask > 0 {
 				// Most commonly, IME is set. In this case, the CPU simply wakes up, and before executing the instruction after the halt, the interrupt handler is called normally.
 				self.cpu.halted = false;
-
 				self.cpu.ime = false;
 				self.intf.set_bits(intf & !mask);
+
+				// we can easily get the ISR (0x40, 048, 0x50, 0x58, 0x60) like this
+				let isr = 0x40 | (bit << 3);
 
 				// Two wait states are executed (2 M-cycles pass while nothing happens; presumably the CPU is executing nops during this time).
 				self.tick();
 				self.tick();
 
-				// we can easily get the ISR (0x40, 048, 0x50, 0x58, 0x60) like this
-				let isr = 0x40 | (bit << 3);				
 				self.rst(isr);
+				break;
 			}
 		}
 	}

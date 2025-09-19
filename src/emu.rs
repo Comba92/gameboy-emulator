@@ -1,4 +1,4 @@
-use crate::{bus::{self, Bus}, cart::CartHeader, cpu::CpuSM83, joypad::Joypad, ppu::Ppu, serial::Serial, timer::Timer};
+use crate::{bus::{self, Bus}, cart::CartHeader, cpu::CpuSM83, joypad::Joypad, mbc::Mbc, ppu::Ppu, serial::Serial, timer::Timer};
 
 #[derive(Default, Debug)]
 pub(crate) enum CGBMode {
@@ -20,10 +20,11 @@ pub(crate) struct Interrupt {
 pub struct Emu {
   pub cpu: CpuSM83,
   pub ppu: Ppu,
-  pub(crate) bus: Bus,
+  pub bus: Bus,
   pub(crate) joypad: Joypad,
   pub(crate) serial: Serial,
   pub(crate) timer: Timer,
+  pub(crate) mbc: Mbc,
 
   pub(crate) inte: Interrupt,
   pub(crate) intf: Interrupt,
@@ -43,6 +44,7 @@ impl Default for Emu {
       joypad: Joypad::default(),
       serial: Serial::default(),
       timer: Timer::default(),
+      mbc: Mbc::None,
 
       header: CartHeader::default(),
       inte: Interrupt::default(),
@@ -67,14 +69,17 @@ impl Emu {
 
   pub fn new(bytes: Vec<u8>) -> Result<Self, String> {
     let header = CartHeader::parse(&bytes)?;
+    let mbc = Mbc::new(header.mapper)?;
 
-    let emu = Self {
+    let mut emu = Self {
       cpu: CpuSM83::new(),
       ppu: Ppu::new(),
-      bus: Bus::new(bytes, 0),
+      bus: Bus::new(bytes, header.ram_size),
       joypad: Joypad::default(),
       serial: Serial::default(),
       timer: Timer::default(),
+      mbc,
+
       header,
       inte: Interrupt::default(),
       intf: Interrupt::default(),
@@ -82,7 +87,31 @@ impl Emu {
       frame_ready: false,
     };
 
+    match &emu.mbc {
+      Mbc::MBC1(mbc1) => {
+        mbc1.update_banks(&mut emu.bus);
+        emu.bus.sram_enable(false);
+      }
+      Mbc::None => {
+        emu.bus.rom_banks.set_page(1, 1);
+      }
+    };
+
     Ok(emu)
+  }
+
+  fn dma_step(&mut self) {
+    // TODO: dma bus conflicts
+    if self.bus.dma.transfering {
+      let src_addr = ((self.bus.dma.src as u16) << 8) | self.bus.dma.count as u16;
+      let val = self.dispatch_read(src_addr);
+      self.dispatch_write(0xfe00 | self.bus.dma.count as u16, val);
+      self.bus.dma.count += 1;
+
+      if self.bus.dma.count >= 160 {
+        self.bus.dma.transfering = false;
+      }
+    }
   }
 
   fn timer_step(&mut self) {
@@ -90,7 +119,7 @@ impl Emu {
     
     // TODO: obscure behaviour
     timer.div = timer.div.wrapping_add(1);
-    if timer.tac & 0x4 > 0 && self.cpu.mcycles as u8 & timer.clock_mask == 0 {
+    if timer.tac & 0x4 > 0 && timer.div as u8 & timer.clock_mask == 0 {
       if timer.tima == 0xff {
         timer.tima = timer.tma;
         self.intf.set_timer(true);
@@ -172,19 +201,14 @@ impl Emu {
 
   pub fn btn_pressed(&mut self, btn: u8) {
     // if button is pressed, it should be 0
-    let curr = self.joypad.buttons.into_bits();
+    let old = self.joypad.buttons.into_bits();
+    self.joypad.buttons.set_bits(old & !btn);
 
     // The Joypad interrupt is requested when any of P1 bits 0-3 change from High to Low (so when first button is pressed)
-    let high_to_low = curr & !btn;
-    // This interrupt is useful to identify button presses if we have only selected either action (bit 5) or direction (bit 4), but not both. 
-    let not_both = !(self.joypad.select_btns && self.joypad.select_dpad);
-    let btns_int = self.joypad.select_btns && high_to_low & 0x0f > 0;
-    let dpad_int = self.joypad.select_dpad && high_to_low & 0xf0 > 0;
-    if not_both && (btns_int || dpad_int) {
+    // This interrupt is useful to identify button presses if we have only selected either action (bit 5) or direction (bit 4), but not both.
+    if old != self.joypad.buttons.into_bits() {
       self.intf.set_joypad(true);
     }
-
-    self.joypad.buttons.set_bits(curr & !btn);
   }
 
   pub fn btn_released(&mut self, btn: u8) {

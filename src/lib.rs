@@ -48,7 +48,7 @@ pub mod joypad {
   impl Joypad {
     // Note that, rather unconventionally for the Game Boy, a button being pressed is seen as the corresponding bit being 0, not 1.
     pub(super) fn read(&self) -> u8 {
-      let res = (0b1100_0000) | ((self.select_dpad as u8) << 4) | ((self.select_btns as u8) << 5);
+      let res = 0xc0 | ((self.select_dpad as u8) << 4) | ((self.select_btns as u8) << 5);
 
       let pressed = match (self.select_dpad, self.select_btns) {
         // if both are selected, or all the buttons

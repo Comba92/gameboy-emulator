@@ -1,14 +1,48 @@
-use crate::{emu::Emu, ppu};
+use crate::{emu::Emu, mbc::Mbc, ppu};
+
+#[derive(Debug)]
+pub (crate) struct Banking {
+  // 4 kb banks
+  banks: Vec<usize>,
+  bank_size: u16,
+  bank_size_shift: u16,
+  banks_count: usize,
+}
+
+impl Banking {
+  fn new(data_size: usize, adressable_size: u16, pages_count: u8) -> Self {
+    let bank_size = adressable_size / pages_count as u16; 
+    Self {
+      banks: vec![0; pages_count as usize],
+      bank_size,
+      bank_size_shift: bank_size.ilog2() as u16,
+      banks_count: data_size / (4 * 1024)
+    }
+  }
+
+  pub (crate) fn set_page(&mut self, page: u8, bank: usize) {
+    let bank = bank & (self.banks_count-1);
+    // 12 is log2 of 4096 (the size of a single bank)
+    // this means an offset is 12bit, and a bank select is in the upper bits
+    // same as (bank as usize) * 4096
+    self.banks[page as usize] = (bank as usize) << self.bank_size_shift;
+  }
+
+  fn translate(&self, addr: usize) -> usize {
+    let page = (addr >> self.bank_size_shift) & (self.banks.len()-1);
+    self.banks[page] + (addr & (self.bank_size as usize-1))
+  }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum Handler {
   Rom, Vram, Sram, Wram, IO, OpenBus, Debug
 }
 
-struct Dma {
-  src: u8,
-  transfering: bool,
-  count: u8,
+pub(crate) struct Dma {
+  pub(crate) src: u8,
+  pub(crate) transfering: bool,
+  pub(crate) count: u8,
 }
 impl Default for Dma {
   fn default() -> Self {
@@ -20,23 +54,27 @@ impl Default for Dma {
   }
 }
 
-pub(crate) struct Bus {
+pub struct Bus {
   pub(crate) handlers: [Handler; 16],
   boot_sector: Option<Vec<u8>>,
-  hram: [u8; 127],
-  rom: Vec<u8>,
-  pub(crate) sram: Vec<u8>,
-  pub(crate) vram: [u8; 16 * 1024],
-  wram: [u8; 32 * 1024],
+  pub(crate) hram: [u8; 127],
+  pub(crate) rom: Vec<u8>,
+  pub sram: Vec<u8>,
+  pub vram: [u8; 16 * 1024],
+  pub(crate) wram: [u8; 32 * 1024],
   pub(crate) oam: [u8; 160],
+  pub(crate) oam_enable: bool,
 
-  dma: Dma,
+  pub(crate) rom_banks: Banking,
+  pub(crate) sram_banks: Banking,
+  pub(crate) dma: Dma,
 }
 
 impl Bus {
   pub fn new(mut rom: Vec<u8>, sram_size: usize) -> Self {
     let sram_handler = if sram_size > 0 { Handler::Sram } else { Handler::OpenBus };
 
+    // 4kb handlers
     let handlers = [
       Handler::Rom,
       Handler::Rom,
@@ -57,7 +95,7 @@ impl Bus {
     ];
 
     // TODO: dynamic bootrom load
-    let bootrom = include_bytes!("../bootroms/dmg_boot.bin");
+    // let bootrom = include_bytes!("../bootroms/dmg_boot.bin");
 
     // // we save the rom which is to be overlapped with the bootrom, and restore it later
     // let boot_sector = Some(rom[..256].to_vec());
@@ -67,47 +105,66 @@ impl Bus {
 
     Self {
       handlers,
+      rom_banks: Banking::new(rom.len(), 0x8000, 2),
+      sram_banks: Banking::new(sram_size, 0x2000, 1),
+
       boot_sector,
-      hram: [0xff; 127],
+      hram: [0; 127],
       rom,
       sram: vec![0; sram_size],
-      vram: [0xff; 16 * 1024],
-      wram: [0xff; 32 * 1024],
-      oam: [0xff; 160],
+      vram: [0; 16 * 1024],
+      wram: [0; 32 * 1024],
+      oam: [0; 160],
+      oam_enable: true,
 
       dma: Default::default(),
+    }
+  }
+
+  fn set_sram_handlers(&mut self, handler: Handler) {
+    self.handlers[10] = handler;
+    self.handlers[11] = handler;
+  }
+
+  fn set_vram_handlers(&mut self, handler: Handler) {
+    self.handlers[8] = handler;
+    self.handlers[9] = handler;
+  }
+
+  pub(crate) fn sram_enable(&mut self, cond: bool) {
+    if !self.sram.is_empty() && cond {
+      self.set_sram_handlers(Handler::Sram);
+    } else {
+      self.set_sram_handlers(Handler::OpenBus);
+    }
+  }
+
+  pub(crate) fn vram_enable(&mut self, cond: bool) {
+    if cond {
+      self.set_vram_handlers(Handler::Vram);
+    } else {
+      self.set_vram_handlers(Handler::OpenBus);
     }
   }
 }
 
 impl Emu {
-  pub fn dma_step(&mut self) {
-    if self.bus.dma.transfering {
-      let src_addr = ((self.bus.dma.src as u16) << 8) | self.bus.dma.count as u16;
-      let val = self.dispatch_read(src_addr);
-      self.dispatch_write(0xfe00 | self.bus.dma.count as u16, val);
-      self.bus.dma.count += 1;
-
-      if self.bus.dma.count >= 160 {
-        self.bus.dma.transfering = false;
-      }
-    }
-  }
-
   pub fn dispatch_read(&mut self, addr: u16) -> u8 {
     let bus = &mut self.bus;
-    let addr = addr as usize;
+    let addr: usize = addr as usize;
 
     let handler = &bus.handlers[addr >> 12];
     match handler {
-      Handler::Rom => bus.rom[addr],
+      Handler::Rom => bus.rom[bus.rom_banks.translate(addr)],
       Handler::Vram => bus.vram[addr - 0x8000],
-      Handler::Sram => bus.sram[addr - 0xa000],
+      Handler::Sram => bus.sram[bus.sram_banks.translate(addr - 0xa000)],
       Handler::Wram => bus.wram[addr - 0xc000],
       Handler::IO => if addr <= 0xfdff {
         bus.wram[addr - 0xe000]
       } else if addr <= 0xfe9f {
-        bus.oam[addr - 0xfe00]
+        if bus.oam_enable {
+          bus.oam[addr - 0xfe00]
+        } else { 0xff }
       } else if addr <= 0xfeff {
         // TODO: value returned depends on OAM blocked or not
         0xff
@@ -130,14 +187,16 @@ impl Emu {
 
     let handler = &bus.handlers[(addr as usize) >> 12];
     match handler {
-      Handler::Rom | Handler::OpenBus => {}
+      Handler::Rom => self.handle_mbc_write(addr, val),
       Handler::Vram => bus.vram[addr - 0x8000] = val,
-      Handler::Sram => bus.sram[addr - 0xa000] = val,
+      Handler::Sram => bus.sram[bus.sram_banks.translate(addr - 0xa000)] = val,
       Handler::Wram => bus.wram[addr - 0xc000] = val,
       Handler::IO => if addr <= 0xfdff {
         bus.wram[addr - 0xe000] = val;
       } else if addr <= 0xfe9f {
-        bus.oam[addr - 0xfe00] = val;
+        if bus.oam_enable {
+          bus.oam[addr - 0xfe00] = val;
+        }
       } else if addr <= 0xfeff {
         // Do nothing here
       } else if addr <= 0xff7f {
@@ -147,6 +206,7 @@ impl Emu {
       } else {
         self.inte.set_bits(val);
       }
+      Handler::OpenBus => {}
 
       Handler::Debug => bus.sram[addr] = val,
     }
@@ -158,7 +218,7 @@ impl Emu {
       0xff01 => 0,
       0xff02 => self.serial.into_bits(),
 
-      0xff04 => (self.timer.div >> 8) as u8,
+      0xff04 => (self.timer.div >> 6) as u8,
       0xff05 => self.timer.tima,
       0xff06 => self.timer.tma,
       0xff07 => self.timer.tac,
@@ -166,13 +226,25 @@ impl Emu {
       0xff0f => self.intf.into_bits() | 0xe0,
 
       0xff40 => self.ppu.ctrl.into_bits(),
-      0xff41 => self.ppu.stat.into_bits(),
+      0xff41 => {
+        // println!("READ STAT {:?}", self.ppu.stat);
+        self.ppu.stat.into_bits()
+      }
       0xff42 => self.ppu.scy,
       0xff43 => self.ppu.scx,
-      0xff44 => self.ppu.ly,
-      0xff45 => self.ppu.lyc,
+      0xff44 => {
+        // println!("READ LY {}", self.ppu.ly);
+        self.ppu.ly
+      }
+      0xff45 => {
+        // println!("READ LYC {}", self.ppu.lyc);
+        self.ppu.lyc
+      }
       0xff46 => self.bus.dma.src,
-      0xff47 => self.ppu.bgp,
+      0xff47 => {
+        // println!("READ BGP {}", self.ppu.bgp);
+        self.ppu.bgp
+      }
       0xff48 => self.ppu.obp0,
       0xff49 => self.ppu.obp1,
       0xff4a => self.ppu.wy,
@@ -215,16 +287,22 @@ impl Emu {
         ppu.obj_size = if ppu.ctrl.obj_size() { 16 } else { 8 };
         ppu.bg_tilemap  = if ppu.ctrl.bg_tilemap() { 0x9c00 } else { 0x9800 };
         ppu.win_tilemap = if ppu.ctrl.win_tileamp() { 0x9c00 } else { 0x9800 };
+
+        // println!("WRITE CTRL {:?}", self.ppu.ctrl);
       }
       0xff41 => {
         let stat = self.ppu.stat.into_bits();
         self.ppu.stat.set_bits((val & 0b0111_1000) | (stat & 0b1000_0111));
-        self.handle_stat_int();
+        if self.ppu.ctrl.lcd_enable() {
+          self.handle_stat_int();
+        }
+        // println!("WRITE STAT {:?}", self.ppu.stat);
       }
       0xff42 => self.ppu.scy = val,
       0xff43 => self.ppu.scx = val,
       0xff45 => {
         self.ppu.lyc = val;
+        // println!("WRITE LYC {}", self.ppu.lyc);
         if self.ppu.ctrl.lcd_enable() {
           self.handle_lyc();
         }
@@ -236,17 +314,42 @@ impl Emu {
       }
       0xff47 => {
         self.ppu.bgp = val;
-        dbg!(self.ppu.bgp);
+        // println!("WRITE BGP {} at {} {} {}", self.ppu.bgp, self.ppu.ly, self.ppu.dots, self.ppu.fetcher.pixel_x);
       }
       0xff48 => self.ppu.obp0 = val,
       0xff49 => self.ppu.obp1 = val,
-      0xff4a => self.ppu.wy = val,
+      0xff4a => {
+        self.ppu.wy = val;
+        // println!("WRITE WY {}", self.ppu.wy);
+      }
       0xff4b => self.ppu.wx = val,
 
       0xff50 => if let Some(boot_sector) = self.bus.boot_sector.take() {
         self.bus.rom[..256].copy_from_slice(&boot_sector);
       }
       _ => {}
+    }
+  }
+
+  fn handle_mbc_write(&mut self, addr: usize, val: u8) {
+    match &mut self.mbc {
+      Mbc::None => {}
+      Mbc::MBC1(mbc1) => match addr >> 12 {
+        0 | 1 => self.bus.sram_enable(val & 0xf == 0xa),
+        2 | 3 => {
+          mbc1.rom_select = if val & 0x1f == 0 { 1 } else { val & 0x1f };
+          mbc1.update_banks(&mut self.bus);
+        }
+        4 | 5 => {
+          mbc1.ram_select = val & 0x3;
+          mbc1.update_banks(&mut self.bus);
+        }
+        6 | 7 => {
+          mbc1.mode = val & 1 > 0;
+          mbc1.update_banks(&mut self.bus);
+        }
+        _ => {}
+      }
     }
   }
 }
