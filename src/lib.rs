@@ -4,6 +4,7 @@ mod bus;
 mod ppu;
 mod cart;
 mod mbc;
+mod apu;
 
 pub mod joypad {
   #[bitfields::bitfield(u8)]
@@ -81,14 +82,29 @@ mod timer {
   }
 }
 
-mod serial {
+mod serial {  
   #[bitfields::bitfield(u8)]
   #[derive(Clone, Copy)]
-  pub(super) struct Serial {
+  pub(super) struct Flags {
     tx_enable: bool,
     #[bits(5, default = 0x1f)]
     _unused: u8,
     clock_speed: bool,
     clock_select: bool,
+  }
+
+  pub(super) struct Serial {
+    pub flags: Flags,
+    pub data: u8,
+    pub count: u8,
+  }
+  impl Default for Serial {
+    fn default() -> Self {
+      Self {
+        flags: Flags::default(),
+        data: 0xff,
+        count: 0,
+      }
+    }
   }
 }

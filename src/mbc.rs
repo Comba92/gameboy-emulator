@@ -1,4 +1,4 @@
-use crate::bus::{Bus, Handler};
+use crate::bus::{Banking, Bus, Handler};
 
 pub (crate) enum Mbc {
   None,
@@ -36,7 +36,8 @@ impl Mbc {
       }
       Mbc::MBC2 => {
         bus.sram.resize(512, 0);
-        bus.set_sram_handlers(Handler::SramMBC2);
+        bus.sram_banks = Banking::new(512, 0x2000, 16);
+        for i in 0..16 { bus.sram_banks.set_page(i, 0); }
         bus.sram_enable(false);
       }
       _ => {}

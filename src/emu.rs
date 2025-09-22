@@ -40,7 +40,7 @@ impl Default for Emu {
       cpu: CpuSM83::new(),
       ppu: Ppu::new(),
       // reads from an absent cartridge usually return $FF
-      bus: Bus::new(vec![0xff; 32 * 1024], 0),
+      bus: Bus::new(&vec![0xff; 32 * 1024], 0),
       joypad: Joypad::default(),
       serial: Serial::default(),
       timer: Timer::default(),
@@ -63,11 +63,7 @@ impl Emu {
     emu
   }
 
-  pub fn from_slice(bytes: &[u8]) -> Result<Self, String> {
-    Self::new(bytes.to_vec())
-  }
-
-  pub fn new(bytes: Vec<u8>) -> Result<Self, String> {
+  pub fn new(bytes: &[u8]) -> Result<Self, String> {
     let header = CartHeader::parse(&bytes)?;
     let mbc = Mbc::new(header.mapper)?;
 
@@ -111,8 +107,14 @@ impl Emu {
   fn timer_step(&mut self) {
     let timer = &mut self.timer;
     
-    // TODO: obscure behaviour
+    // TODO: obscure TIMA overflow behaviour
     timer.div = timer.div.wrapping_add(1);
+    self.timer_tima_step();
+  }
+
+  pub(crate) fn timer_tima_step(&mut self) {
+    let timer = &mut self.timer;
+
     if timer.tac & 0x4 > 0 && timer.div as u8 & timer.clock_mask == 0 {
       if timer.tima == 0xff {
         timer.tima = timer.tma;
@@ -124,8 +126,17 @@ impl Emu {
   }
 
   fn serial_step(&mut self) {
-    // TODO: CGB transfer speed
-
+    let serial = &mut self.serial;
+    
+    if serial.flags.tx_enable() {
+      serial.data = (serial.data << 1) | 1;
+      if serial.count > 0 {
+        serial.count -= 1;
+      } else {
+        serial.flags.set_tx_enable(false);
+        self.intf.set_serial(true);
+      }
+    }
   }
 
 	pub(crate) fn tick(&mut self) {
@@ -133,6 +144,7 @@ impl Emu {
     
     self.dma_step();
     self.timer_step();
+    self.serial_step();
     
 		self.ppu_step();
 		self.ppu_step();

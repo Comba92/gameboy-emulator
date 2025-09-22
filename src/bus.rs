@@ -1,4 +1,4 @@
-use crate::{emu::Emu, mbc::{Mbc, MBC3}, ppu};
+use crate::{emu::Emu, mbc::Mbc, ppu};
 
 #[derive(Debug)]
 pub (crate) struct Banking {
@@ -12,8 +12,12 @@ pub (crate) struct Banking {
 impl Banking {
   pub(crate) fn new(data_size: usize, adressable_size: u16, pages_count: u8) -> Self {
     let bank_size = adressable_size / pages_count as u16; 
+    let banks = (0..pages_count as usize)
+      .map(|i| i * bank_size as usize)
+      .collect();
+    
     Self {
-      banks: vec![0; pages_count as usize],
+      banks,
       bank_size,
       bank_size_shift: bank_size.ilog2() as u16,
       banks_count: data_size / bank_size as usize,
@@ -36,7 +40,7 @@ impl Banking {
 
 #[derive(Clone, Copy)]
 pub(crate) enum Handler {
-  Rom, Vram, Sram, SramMBC2, MBC, Wram, IO, OpenBus, Debug
+  Rom, Vram, Sram, MBC, Wram, IO, OpenBus, Debug
 }
 
 pub(crate) struct Dma {
@@ -68,10 +72,12 @@ pub struct Bus {
   pub(crate) rom_banks: Banking,
   pub(crate) sram_banks: Banking,
   pub(crate) dma: Dma,
+
+  dobule_speed: bool,
 }
 
 impl Bus {
-  pub fn new(rom: Vec<u8>, sram_size: usize) -> Self {
+  pub fn new(rom: &[u8], sram_size: usize) -> Self {
     let sram_handler = if sram_size > 0 { Handler::Sram } else { Handler::OpenBus };
 
     // 4kb handlers
@@ -94,7 +100,9 @@ impl Bus {
       Handler::IO,
     ];
 
-    // TODO: dynamic bootrom load
+    let mut rom = rom.to_vec();
+
+    // // TODO: dynamic bootrom load
     // let bootrom = include_bytes!("../bootroms/dmg_boot.bin");
 
     // // we save the rom which is to be overlapped with the bootrom, and restore it later
@@ -103,12 +111,9 @@ impl Bus {
 
     let boot_sector = None;
 
-    let mut rom_banks = Banking::new(rom.len(), 0x8000, 2);
-    rom_banks.set_page(1, 1);
-
     Self {
       handlers,
-      rom_banks,
+      rom_banks: Banking::new(rom.len(), 0x8000, 2),
       sram_banks: Banking::new(sram_size, 0x2000, 1),
 
       boot_sector,
@@ -119,6 +124,7 @@ impl Bus {
       wram: [0; 32 * 1024],
       oam: [0; 160],
       oam_enable: true,
+      dobule_speed: false,
 
       dma: Default::default(),
     }
@@ -176,11 +182,9 @@ impl Emu {
       } else if addr <= 0xfffe {
         bus.hram[addr - 0xff80]
       } else {
-        self.inte.into_bits() | 0xe0
+        self.inte.into_bits()
       }
       Handler::OpenBus => 0xff,
-
-      Handler::SramMBC2 => bus.sram[(addr - 0xa000) % 512],
       Handler::MBC => self.mbc.read(),
 
       Handler::Debug => bus.sram[addr],
@@ -213,26 +217,34 @@ impl Emu {
         self.inte.set_bits(val);
       }
       Handler::OpenBus => {}
-
-      Handler::SramMBC2 => bus.sram[(addr - 0xa000) % 512] = val & 0xf,
       Handler::MBC => self.mbc.write(val),
 
       Handler::Debug => bus.sram[addr] = val,
     }
   }
 
-  fn handle_io_read(&mut self, addr: usize) -> u8 {
+  fn handle_io_read(&mut self, addr: usize) -> u8 {    
     match addr {
-      0xff00 => self.joypad.read(),
-      0xff01 => 1,
-      0xff02 => self.serial.into_bits(),
+      0xff00 => {
+        // println!("Joypad read: {:02x}", self.joypad.read());
+        self.joypad.read()
+      }
+      0xff01 => {
+        // println!("Serial data read: {} {:02x}", self.serial.data, self.serial.data);
+        self.serial.data
+      }
+      0xff02 => {
+        // println!("Serial ctrl read: {:02x}", self.serial.flags.into_bits());
+        self.serial.flags.into_bits()
+      }
 
+      // div is a 14bit register
       0xff04 => (self.timer.div >> 6) as u8,
       0xff05 => self.timer.tima,
       0xff06 => self.timer.tma,
       0xff07 => self.timer.tac,
 
-      0xff0f => self.intf.into_bits() | 0xe0,
+      0xff0f => self.intf.into_bits(),
 
       0xff40 => self.ppu.ctrl.into_bits(),
       0xff41 => {
@@ -265,10 +277,29 @@ impl Emu {
 
   fn handle_io_write(&mut self, addr: usize, val: u8) {
     match addr {
-      0xff00 => self.joypad.write(val),
-      0xff02 => self.serial.set_bits(val),
+      0xff00 => {
+        self.joypad.write(val);
+        // println!("Joypad write: {} {:02x}", val, val);
+      }
+      0xff01 => {
+        self.serial.data = val;
+        // println!("Serial data write: {} {:02x}", val, val);
+      }
+      0xff02 => {
+        self.serial.flags.set_bits(val);
+        if self.serial.flags.tx_enable() && self.serial.flags.clock_select() {
+          self.serial.count = 8;
+        } else {
+          self.serial.count = 0;
+        }
 
-      0xff04 => self.timer.div = 0,
+        // println!("Serial ctrl write: {:02x}", val);
+      }
+
+      0xff04 => {
+        self.timer.div = 0;
+        // self.timer_tima_step();
+      }
       0xff05 => self.timer.tima = val,
       0xff06 => self.timer.tma = val,
       0xff07 => {
@@ -279,6 +310,7 @@ impl Emu {
           2 => 15,
           _ => 63
         };
+        // self.timer_tima_step();
       }
 
       0xff0f => self.intf.set_bits(val),
@@ -361,10 +393,10 @@ impl Emu {
       }
 
       Mbc::MBC2 => match addr >> 12 {
-        0..=3 => if addr & 0x80 > 0 {
-          self.bus.sram_enable(val & 0xf == 0xa);
-        } else {
+        0..=3 => if addr & 0x100 > 0 {
           self.bus.rom_banks.set_page(1, (val & 0xf).max(1) as usize);
+        } else {
+          self.bus.sram_enable(val & 0xf == 0xa);
         }
         _ => {}
       }

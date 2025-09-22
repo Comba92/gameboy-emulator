@@ -81,7 +81,7 @@ fn test_whole_file() {
   let mut log  = String::new();
 
   let rom = std::fs::read("./roms_tests/gb-test-roms/cpu_instrs/individual/01-special.gb").unwrap();
-  let mut emu = Emu::new(rom).unwrap();
+  let mut emu = Emu::new(&rom).unwrap();
 
   let mut line = 0;
   while let Ok(len) = reader.read_line(&mut log) {

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bitfields = "1.0.0"
+blip_buf = "0.1.5"
 sdl2 = "0.38.0"
 zip = "5.0.1"
 

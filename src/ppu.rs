@@ -137,6 +137,7 @@ pub struct Ppu {
   mode: Mode,
   stat_int_line: bool, 
   pub(crate) dots: u16,
+  pub(crate) scanline: u8,
 }
 impl Ppu {
   pub fn new() -> Self {
@@ -216,6 +217,7 @@ impl Emu {
     let ppu = &mut self.ppu;
     ppu.dots = 0;
     self.ppu.ly += 1;
+    self.ppu.scanline += 1;
     // self.handle_lyc();
   }
 
@@ -568,11 +570,15 @@ impl Emu {
         self.ly_increase();
 
         let ppu = &mut self.ppu;
-        if ppu.ly >= 154 {
+        if ppu.scanline >= 154 {
+          ppu.scanline = 0;
           ppu.ly = 0;
           ppu.win_ly = 0;
           ppu.is_window_scanline_reached = false;
           self.enter_mode2();
+        } else if ppu.ly == 153 {
+          // https://github.com/Ashiepaws/GBEDG/blob/master/bugs/index.md#flickering-line-in-intro-sequence
+          ppu.ly = 0;
         }
       }
 
