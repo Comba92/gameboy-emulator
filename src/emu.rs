@@ -1,4 +1,4 @@
-use crate::{bus::{self, Bus}, cart::CartHeader, cpu::CpuSM83, joypad::Joypad, mbc::Mbc, ppu::Ppu, serial::Serial, timer::Timer};
+use crate::{apu::Apu, bus::{self, Bus}, cart::CartHeader, cpu::CpuSM83, joypad::Joypad, mbc::Mbc, ppu::Ppu, serial::Serial, timer::Timer};
 
 #[derive(Default, Debug)]
 pub(crate) enum CGBMode {
@@ -21,6 +21,7 @@ pub struct Emu {
   pub cpu: CpuSM83,
   pub ppu: Ppu,
   pub bus: Bus,
+  pub apu: Apu,
   pub(crate) joypad: Joypad,
   pub(crate) serial: Serial,
   pub(crate) timer: Timer,
@@ -31,6 +32,7 @@ pub struct Emu {
 
   header: CartHeader,
   pub(crate) videobuf: [u8; 160 * 144],
+  audiobuf: [i16; 4 * 1024],
   pub(crate) frame_ready: bool,
 }
 
@@ -39,6 +41,7 @@ impl Default for Emu {
     Self {
       cpu: CpuSM83::new(),
       ppu: Ppu::new(),
+      apu: Apu::default(),
       // reads from an absent cartridge usually return $FF
       bus: Bus::new(&vec![0xff; 32 * 1024], 0),
       joypad: Joypad::default(),
@@ -50,6 +53,7 @@ impl Default for Emu {
       inte: Interrupt::default(),
       intf: Interrupt::default(),
       videobuf: [0; 160 * 144],
+      audiobuf: [0; 4 * 1024],
       frame_ready: false,
     }
   }
@@ -74,6 +78,7 @@ impl Emu {
     let emu = Self {
       cpu: CpuSM83::new(),
       ppu: Ppu::new(),
+      apu: Apu::default(),
       bus,
       joypad: Joypad::default(),
       serial: Serial::default(),
@@ -84,6 +89,7 @@ impl Emu {
       inte: Interrupt::default(),
       intf: Interrupt::default(),
       videobuf: [0; 160 * 144],
+      audiobuf: [0; 4 * 1024],
       frame_ready: false,
     };
 
@@ -105,14 +111,19 @@ impl Emu {
   }
 
   fn timer_step(&mut self) {
-    let timer = &mut self.timer;
-    
-    // TODO: obscure TIMA overflow behaviour
-    timer.div = timer.div.wrapping_add(1);
+    // 512 hz
+    if self.timer.div % 2048 == 0 {
+      self.apu_div_step();
+    }
+
     self.timer_tima_step();
+    
+    // 16384 hz, first 6 bits are not visible
+    self.timer.div = self.timer.div.wrapping_add(1);
   }
 
   pub(crate) fn timer_tima_step(&mut self) {
+    // TODO: obscure TIMA overflow behaviour
     let timer = &mut self.timer;
 
     if timer.tac & 0x4 > 0 && timer.div as u8 & timer.clock_mask == 0 {
@@ -145,6 +156,7 @@ impl Emu {
     self.dma_step();
     self.timer_step();
     self.serial_step();
+    self.apu_step();
     
 		self.ppu_step();
 		self.ppu_step();
@@ -152,11 +164,17 @@ impl Emu {
 		self.ppu_step();
 	}
 
-  pub fn step_until_vblank(&mut self) {
+  pub fn emu_step_until_vblank(&mut self) {
+    let cycles = self.cpu.mcycles;
     while !self.frame_ready {
       self.cpu_step();
     }
+    let cycles_run = self.cpu.mcycles - cycles;
+
     self.frame_ready = false;
+
+    self.apu.blip.0.end_frame(self.apu.frame_cycles as u32);
+    self.apu.frame_cycles -= cycles_run;
   }
 
   #[deprecated]
@@ -208,6 +226,11 @@ impl Emu {
       buf[i * 4 + 2] = color.2;
       buf[i * 4 + 3] = 255;
     }
+  }
+
+  pub fn get_audio(&mut self) -> &[i16] {
+    let read = self.apu.blip.0.read_samples(&mut self.audiobuf[..self.apu.blip.0.samples_avail() as usize], false);
+    &self.audiobuf[..read]
   }
 
   pub fn btn_pressed(&mut self, btn: u8) {

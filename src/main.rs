@@ -48,6 +48,16 @@ fn main() {
     let timer = sdl.timer().unwrap();
     let frame_rate = (1.0f64 / 59.73 * 1000.0).round() as u64;
 
+    let audio = sdl.audio().unwrap();
+
+    let audiospec = sdl2::audio::AudioSpecDesired {
+        channels: Some(1),
+        freq: Some(48000),
+        samples: None,
+    };
+    let audiodev = audio.open_queue(None, &audiospec).unwrap();
+    audiodev.resume();
+
     let mut emu = Emu::new(include_bytes!("../roms/dmg-acid2.gb")).unwrap();
 
     'running: loop {
@@ -101,7 +111,16 @@ fn main() {
         canvas.set_draw_color(sdl2::pixels::Color::GRAY);
         canvas.clear();
 
-        emu.step_until_vblank();
+        emu.emu_step_until_vblank();
+
+        audiodev.queue_audio(emu.get_audio()).unwrap();
+
+        while audiodev.size()/2 < audiodev.spec().samples as u32 * 2 {
+            // run for another frame
+
+            emu.emu_step_until_vblank();
+            audiodev.queue_audio(emu.get_audio()).unwrap();
+        }
 
         tex.with_lock(None, |pixels, _| {
             emu.get_framebuf_rgba(pixels);
