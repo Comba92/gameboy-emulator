@@ -246,6 +246,8 @@ impl Emu {
 
       0xff0f => self.intf.into_bits(),
 
+      0xff10..=0xff3f => self.apu_read(addr),
+
       0xff40 => self.ppu.ctrl.into_bits(),
       0xff41 => {
         // println!("READ STAT {:?}", self.ppu.stat);
@@ -305,15 +307,17 @@ impl Emu {
       0xff07 => {
         self.timer.tac = 0xf8 | (val & 0x7);
         self.timer.clock_mask = match val & 0x3 {
-          0 => 255,
-          1 => 3,
-          2 => 15,
-          _ => 63
+          0 => 255, // 4096 hz
+          1 => 3, // 262144 hz
+          2 => 15, // 65536 hz
+          _ => 63 // 16384 hz
         };
         // self.timer_tima_step();
       }
 
       0xff0f => self.intf.set_bits(val),
+
+      0xff10..=0xff3f => self.apu_write(addr, val),
 
       0xff40 => {
         let new_ctrl = ppu::Ctrl::from_bits(val);
