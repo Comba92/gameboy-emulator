@@ -2,16 +2,16 @@ use crate::{
     bus::Bus,
     cpu::CpuSm83,
     ppu::Ppu,
-    rom::{Cart, is_valid_bios},
+    rom::{Cart, RomData, is_valid_bios},
 };
 use std::path::Path;
 
-const DMG_CLOCK_RATE: usize = 4194304;
-const CBG_CLOCK_RATE: usize = 2 * DMG_CLOCK_RATE;
-const FRAME_RATE: f32 = 59.73;
+pub const DMG_CLOCK_RATE: usize = 4194304;
+pub const CBG_CLOCK_RATE: usize = 2 * DMG_CLOCK_RATE;
+pub const FRAME_RATE: f32 = 59.73;
 
-const SCREEN_WIDTH: isize = 160;
-const SCREEN_HEIGHT: isize = 144;
+pub const SCREEN_WIDTH: isize = 160;
+pub const SCREEN_HEIGHT: isize = 144;
 
 pub const FRAMEBUF_SIZE: usize = SCREEN_WIDTH as usize * SCREEN_HEIGHT as usize * 4;
 pub const AUDIO_FRAMES_BUFFERED: usize = 8;
@@ -51,6 +51,10 @@ impl GbEmulator {
         }
     }
 
+    pub fn empty() -> Self {
+        Self::new(Cart::default(), None::<&[u8]>).unwrap()
+    }
+
     fn new<B: AsRef<[u8]>>(game: Cart, bios: Option<B>) -> Result<Self, LoadError> {
         if let Some(bios) = &bios {
             if !is_valid_bios(bios.as_ref()) {
@@ -68,6 +72,14 @@ impl GbEmulator {
             ),
             output: GbOutput::default(),
         })
+    }
+
+    pub fn rom_info(&self) -> &RomData {
+        &self.bus.header
+    }
+
+    pub fn get_video_rgba(&self) -> &[u8; FRAMEBUF_SIZE] {
+        &self.output.videobuf_view.0
     }
 
     pub fn load_rom_from_unzipped_bytes<R: AsRef<[u8]>, B: AsRef<[u8]>>(

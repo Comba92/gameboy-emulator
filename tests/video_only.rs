@@ -14,7 +14,7 @@ use sdl2::{
     pixels::PixelFormatEnum,
     render::ScaleMode,
 };
-use tomboyemu_core::emu::GbEmulator;
+use tomboyemu_core::emu::{self, GbEmulator};
 const AXIS_DEAD_ZONE: i16 = 10_000;
 
 fn arc_mutex<T>(inner: T) -> Arc<Mutex<T>> {
@@ -55,7 +55,7 @@ fn main() {
     // let emu = GbEmulator::load_rom_from_file(&rom_path, Some(bios)).unwrap();
     let emu = GbEmulator::empty();
 
-    let frame_rate = time::Duration::from_secs_f32(1.0 / emu.frame_rate());
+    let frame_rate = time::Duration::from_secs_f32(1.0 / emu::FRAME_RATE);
     let emu = arc_mutex(emu);
 
     'running: loop {
@@ -107,7 +107,6 @@ fn main() {
                             Keycode::A => emu_lock.set_button(InputBtn::B, true),
                             Keycode::W => emu_lock.set_button(InputBtn::Start, true),
                             Keycode::E => emu_lock.set_button(InputBtn::Select, true),
-                            Keycode::NUM_0 => emu_lock.mapper.special_input(),
                             #[cfg(feature = "savestates")]
                             Keycode::NUM_9 => emu_lock.savestate("./save.tmp").unwrap(),
                             #[cfg(feature = "savestates")]
@@ -116,7 +115,7 @@ fn main() {
                             }
                             Keycode::R => {
                                 // save_battery(&rom_path, &emu_lock);
-                                emu_lock.emu_reset();
+                                // emu_lock.emu_reset();
                                 // load_battery(&rom_path, &mut emu_lock);
                             }
 

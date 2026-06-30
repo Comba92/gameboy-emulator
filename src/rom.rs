@@ -24,7 +24,7 @@ impl Cart {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug, Clone)]
 enum ConsoleMode {
     #[default]
     DMG,
@@ -32,14 +32,14 @@ enum ConsoleMode {
     CGB,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug, Clone)]
 enum Region {
     #[default]
     Japan,
     World,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug, Clone)]
 pub struct RomData {
     title: String,
     revision: u8,

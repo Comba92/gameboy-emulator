@@ -34,7 +34,7 @@ const DEFAULT_MAP: [Handler; 16] = [
 pub(crate) struct Bus {
     rom: Box<[u8]>,
     bios: Box<[u8]>,
-    header: RomData,
+    pub(crate) header: RomData,
 
     hram: [u8; 128],
     vram: Box<[u8]>,
