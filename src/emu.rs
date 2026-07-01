@@ -1,8 +1,5 @@
 use crate::{
-    bus::Bus,
-    cpu::CpuSm83,
-    ppu::Ppu,
-    rom::{Cart, RomData, is_valid_bios},
+    bus::Bus, cpu::CpuSm83, joypad::Joypad, ppu::{DMG_PALETTE, Ppu}, rom::{Cart, RomData, is_valid_bios}, serial::Serial
 };
 use std::path::Path;
 
@@ -19,7 +16,7 @@ pub const AUDIO_FRAMES_BUFFERED: usize = 8;
 pub(crate) type LoadError = Box<dyn std::error::Error>;
 
 #[derive(Default)]
-struct GbOutput {
+pub(crate) struct GbOutput {
     pub(crate) frame_ready: bool,
     pub(crate) frame_number: usize,
     pub(crate) videobuf_back: Box<Framebuf>,
@@ -36,9 +33,11 @@ impl Default for Framebuf {
 pub struct GbEmulator {
     pub cpu: CpuSm83,
     pub(crate) bus: Bus,
-    ppu: Ppu,
+    pub(crate) ppu: Ppu,
+    pub(crate) serial: Serial,
+    pub(crate) joy: Joypad,
 
-    output: GbOutput,
+    pub(crate) output: GbOutput,
 }
 
 impl GbEmulator {
@@ -47,7 +46,9 @@ impl GbEmulator {
             cpu: CpuSm83::new(),
             bus: Bus::with_ram_64kb(),
             ppu: Ppu::new(),
-            output: Default::default(),
+            serial: Serial::new(),
+            joy: Joypad::new(),
+            output: GbOutput::default(),
         }
     }
 
@@ -70,6 +71,8 @@ impl GbEmulator {
                 bios.map(|x| x.as_ref().to_vec())
                     .unwrap_or_else(|| vec![0; 0x100]),
             ),
+            serial: Serial::new(),
+            joy: Joypad::new(),
             output: GbOutput::default(),
         })
     }
@@ -78,8 +81,55 @@ impl GbEmulator {
         &self.bus.header
     }
 
+    pub fn clock_rate(&self) -> usize {
+        DMG_CLOCK_RATE
+    }
+
+    pub fn step(&mut self) {
+        self.cpu_step();
+    }
+
+    pub fn step_until_frame_ready(&mut self) {
+        self.output.frame_ready = false;
+
+        let cycles = self.cpu.mcycles;
+        while !self.output.frame_ready {
+            self.step();
+        }
+    }
+
     pub fn get_video_rgba(&self) -> &[u8; FRAMEBUF_SIZE] {
         &self.output.videobuf_view.0
+    }
+
+    pub fn get_tilesmap_rgba(&self, buf: &mut [u8]) {
+        for i in 0..384 {
+            let x = i % 32;
+            let y = i / 32;
+            let tile_start = i * 16;
+            let tile = &self.bus.vram[tile_start..tile_start + 16];
+            let fx = x * 16;
+            let fy = y * 16;
+
+            for row in 0..8 {
+                let plane0 = tile[row * 2];
+                let plane1 = tile[row * 2 + 1];
+                for bit in 0..8 {
+                    let bit0 = (plane0 >> bit) & 1;
+                    let bit1 = ((plane1 >> bit) & 1) << 1;
+                    let color_idx = bit1 | bit0;
+                    let px = fx + 7 - bit;
+                    let py = fy + row;
+
+                    let color = &DMG_PALETTE[color_idx as usize];
+                    let idx = (py * 256 as usize + px) * 4;
+                    buf[idx + 0] = color.0;
+                    buf[idx + 1] = color.1;
+                    buf[idx + 2] = color.2;
+                    buf[idx + 3] = 255;
+                }
+            }
+        }
     }
 
     pub fn load_rom_from_unzipped_bytes<R: AsRef<[u8]>, B: AsRef<[u8]>>(

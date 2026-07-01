@@ -1,8 +1,6 @@
 use std::{
-    fs,
-    io::{Read, Write},
-    path,
-    sync::{self, Arc, Mutex},
+    path::{self, PathBuf},
+    sync::{Arc, Mutex},
     thread, time,
 };
 
@@ -21,6 +19,7 @@ fn arc_mutex<T>(inner: T) -> Arc<Mutex<T>> {
     Arc::new(Mutex::new(inner))
 }
 
+#[test]
 fn main() {
     let sdl = sdl2::init().unwrap();
     let video = sdl.video().unwrap();
@@ -30,7 +29,7 @@ fn main() {
     // let timer = sdl.timer().unwrap();
 
     let window = video
-        .window("NesEmu", 256 * 3, 240 * 3)
+        .window("NesEmu", 256 * 3, 256 * 3)
         .position_centered()
         .resizable()
         .build()
@@ -41,15 +40,15 @@ fn main() {
         // .present_vsync()
         .build()
         .unwrap();
-    canvas.set_logical_size(256, 240).unwrap();
+    canvas.set_logical_size(256, 256).unwrap();
     let texture_creator = canvas.texture_creator();
     let mut tex = texture_creator
-        .create_texture_streaming(PixelFormatEnum::RGBA32, 256, 240)
+        .create_texture_streaming(PixelFormatEnum::RGBA32, 256, 256)
         .unwrap();
     tex.set_scale_mode(ScaleMode::Nearest);
 
-    let mut bios_path = None;
-    let mut rom_path = path::PathBuf::new();
+    let mut bios_path = PathBuf::from("utils/dmg_boot.bin");
+    let mut rom_path = PathBuf::from("../roms/dmg-acid2.gb");
 
     // let emu = GbEmulator::load_bios_only(Some(bios)).unwrap();
     // let emu = GbEmulator::load_rom_from_file(&rom_path, Some(bios)).unwrap();
@@ -70,140 +69,135 @@ fn main() {
                     _ => {}
                 },
                 Event::DropFile { filename, .. } => {
-                    if filename.ends_with(".pal") {
-                        let buf = fs::read(filename).unwrap();
-                        _ = emu.lock().unwrap().load_palette(&buf);
-                        continue;
-                    } else if filename == "disksys.bin" {
-                        bios_path = Some(path::PathBuf::from(&filename));
-                    }
+                    if filename.ends_with(".bin") {
+                        bios_path = PathBuf::from(&filename);
+                    } else {
+                        let new_emu = GbEmulator::load_rom_from_file(&filename, Some(&bios_path));
+                        match new_emu {
+                            Ok(res) => {
+                                let mut emu_lock = emu.lock().unwrap();
 
-                    let new_emu = GbEmulator::load_rom_from_file(&filename, bios_path.as_ref());
-                    match new_emu {
-                        Ok(res) => {
-                            let mut emu_lock = emu.lock().unwrap();
-
-                            // save current game battery
-                            // save_battery(&rom_path, &emu_lock);
-
-                            *emu_lock = res;
-                            rom_path = path::PathBuf::from(filename);
-                            println!("{:?}", emu_lock.rom_info());
-
-                            // load_battery(&rom_path, &mut emu_lock);
-                        }
-                        Err(e) => eprintln!("{e}"),
-                    }
-                }
-                Event::KeyDown { keycode, .. } => {
-                    if let Some(keycode) = keycode {
-                        let mut emu_lock = emu.lock().unwrap();
-                        match keycode {
-                            Keycode::Up => emu_lock.set_button(InputBtn::Up, true),
-                            Keycode::Left => emu_lock.set_button(InputBtn::Left, true),
-                            Keycode::Down => emu_lock.set_button(InputBtn::Down, true),
-                            Keycode::Right => emu_lock.set_button(InputBtn::Right, true),
-                            Keycode::S => emu_lock.set_button(InputBtn::A, true),
-                            Keycode::A => emu_lock.set_button(InputBtn::B, true),
-                            Keycode::W => emu_lock.set_button(InputBtn::Start, true),
-                            Keycode::E => emu_lock.set_button(InputBtn::Select, true),
-                            #[cfg(feature = "savestates")]
-                            Keycode::NUM_9 => emu_lock.savestate("./save.tmp").unwrap(),
-                            #[cfg(feature = "savestates")]
-                            Keycode::NUM_8 => {
-                                emu_lock.loadstate("./save.tmp").unwrap();
-                            }
-                            Keycode::R => {
+                                // save current game battery
                                 // save_battery(&rom_path, &emu_lock);
-                                // emu_lock.emu_reset();
+
+                                *emu_lock = res;
+                                rom_path = path::PathBuf::from(filename);
+                                println!("{:?}", emu_lock.rom_info());
+
                                 // load_battery(&rom_path, &mut emu_lock);
                             }
-
-                            _ => {}
+                            Err(e) => eprintln!("{e}"),
                         }
                     }
                 }
+                // Event::KeyDown { keycode, .. } => {
+                //     if let Some(keycode) = keycode {
+                //         let mut emu_lock = emu.lock().unwrap();
+                //         match keycode {
+                //             Keycode::Up => emu_lock.set_button(InputBtn::Up, true),
+                //             Keycode::Left => emu_lock.set_button(InputBtn::Left, true),
+                //             Keycode::Down => emu_lock.set_button(InputBtn::Down, true),
+                //             Keycode::Right => emu_lock.set_button(InputBtn::Right, true),
+                //             Keycode::S => emu_lock.set_button(InputBtn::A, true),
+                //             Keycode::A => emu_lock.set_button(InputBtn::B, true),
+                //             Keycode::W => emu_lock.set_button(InputBtn::Start, true),
+                //             Keycode::E => emu_lock.set_button(InputBtn::Select, true),
+                //             #[cfg(feature = "savestates")]
+                //             Keycode::NUM_9 => emu_lock.savestate("./save.tmp").unwrap(),
+                //             #[cfg(feature = "savestates")]
+                //             Keycode::NUM_8 => {
+                //                 emu_lock.loadstate("./save.tmp").unwrap();
+                //             }
+                //             Keycode::R => {
+                //                 // save_battery(&rom_path, &emu_lock);
+                //                 // emu_lock.emu_reset();
+                //                 // load_battery(&rom_path, &mut emu_lock);
+                //             }
 
-                Event::KeyUp { keycode, .. } => {
-                    if let Some(keycode) = keycode {
-                        let mut emu_lock = emu.lock().unwrap();
-                        match keycode {
-                            Keycode::Up => emu_lock.set_button(InputBtn::Up, false),
-                            Keycode::Left => emu_lock.set_button(InputBtn::Left, false),
-                            Keycode::Down => emu_lock.set_button(InputBtn::Down, false),
-                            Keycode::Right => emu_lock.set_button(InputBtn::Right, false),
-                            Keycode::S => emu_lock.set_button(InputBtn::A, false),
-                            Keycode::A => emu_lock.set_button(InputBtn::B, false),
-                            Keycode::W => emu_lock.set_button(InputBtn::Start, false),
-                            Keycode::E => emu_lock.set_button(InputBtn::Select, false),
-                            _ => {}
-                        }
-                    }
-                }
+                //             _ => {}
+                //         }
+                //     }
+                // }
 
-                Event::ControllerButtonDown { button, .. } => {
-                    let mut emu_lock = emu.lock().unwrap();
-                    match button {
-                        Button::DPadUp => emu_lock.set_button(InputBtn::Up, true),
-                        Button::DPadLeft => emu_lock.set_button(InputBtn::Left, true),
-                        Button::DPadDown => emu_lock.set_button(InputBtn::Down, true),
-                        Button::DPadRight => emu_lock.set_button(InputBtn::Right, true),
-                        Button::A => emu_lock.set_button(InputBtn::A, true),
-                        Button::X => emu_lock.set_button(InputBtn::B, true),
-                        Button::Start => emu_lock.set_button(InputBtn::Start, true),
-                        Button::Back => emu_lock.set_button(InputBtn::Select, true),
-                        _ => {}
-                    }
-                }
+                // Event::KeyUp { keycode, .. } => {
+                //     if let Some(keycode) = keycode {
+                //         let mut emu_lock = emu.lock().unwrap();
+                //         match keycode {
+                //             Keycode::Up => emu_lock.set_button(InputBtn::Up, false),
+                //             Keycode::Left => emu_lock.set_button(InputBtn::Left, false),
+                //             Keycode::Down => emu_lock.set_button(InputBtn::Down, false),
+                //             Keycode::Right => emu_lock.set_button(InputBtn::Right, false),
+                //             Keycode::S => emu_lock.set_button(InputBtn::A, false),
+                //             Keycode::A => emu_lock.set_button(InputBtn::B, false),
+                //             Keycode::W => emu_lock.set_button(InputBtn::Start, false),
+                //             Keycode::E => emu_lock.set_button(InputBtn::Select, false),
+                //             _ => {}
+                //         }
+                //     }
+                // }
 
-                Event::ControllerButtonUp { button, .. } => {
-                    let mut emu_lock = emu.lock().unwrap();
-                    match button {
-                        Button::DPadUp => emu_lock.set_button(InputBtn::Up, false),
-                        Button::DPadLeft => emu_lock.set_button(InputBtn::Left, false),
-                        Button::DPadDown => emu_lock.set_button(InputBtn::Down, false),
-                        Button::DPadRight => emu_lock.set_button(InputBtn::Right, false),
-                        Button::A => emu_lock.set_button(InputBtn::A, false),
-                        Button::X => emu_lock.set_button(InputBtn::B, false),
-                        Button::Start => emu_lock.set_button(InputBtn::Start, false),
-                        Button::Back => emu_lock.set_button(InputBtn::Select, false),
-                        _ => {}
-                    }
-                }
+                // Event::ControllerButtonDown { button, .. } => {
+                //     let mut emu_lock = emu.lock().unwrap();
+                //     match button {
+                //         Button::DPadUp => emu_lock.set_button(InputBtn::Up, true),
+                //         Button::DPadLeft => emu_lock.set_button(InputBtn::Left, true),
+                //         Button::DPadDown => emu_lock.set_button(InputBtn::Down, true),
+                //         Button::DPadRight => emu_lock.set_button(InputBtn::Right, true),
+                //         Button::A => emu_lock.set_button(InputBtn::A, true),
+                //         Button::X => emu_lock.set_button(InputBtn::B, true),
+                //         Button::Start => emu_lock.set_button(InputBtn::Start, true),
+                //         Button::Back => emu_lock.set_button(InputBtn::Select, true),
+                //         _ => {}
+                //     }
+                // }
 
-                Event::ControllerAxisMotion {
-                    axis: Axis::LeftX,
-                    value,
-                    ..
-                } => {
-                    let mut emu_lock = emu.lock().unwrap();
+                // Event::ControllerButtonUp { button, .. } => {
+                //     let mut emu_lock = emu.lock().unwrap();
+                //     match button {
+                //         Button::DPadUp => emu_lock.set_button(InputBtn::Up, false),
+                //         Button::DPadLeft => emu_lock.set_button(InputBtn::Left, false),
+                //         Button::DPadDown => emu_lock.set_button(InputBtn::Down, false),
+                //         Button::DPadRight => emu_lock.set_button(InputBtn::Right, false),
+                //         Button::A => emu_lock.set_button(InputBtn::A, false),
+                //         Button::X => emu_lock.set_button(InputBtn::B, false),
+                //         Button::Start => emu_lock.set_button(InputBtn::Start, false),
+                //         Button::Back => emu_lock.set_button(InputBtn::Select, false),
+                //         _ => {}
+                //     }
+                // }
 
-                    if value > AXIS_DEAD_ZONE {
-                        emu_lock.set_button(InputBtn::Right, true);
-                    } else if value < -AXIS_DEAD_ZONE {
-                        emu_lock.set_button(InputBtn::Left, true);
-                    } else {
-                        emu_lock.set_button(InputBtn::Left, false);
-                        emu_lock.set_button(InputBtn::Right, false);
-                    }
-                }
-                Event::ControllerAxisMotion {
-                    axis: Axis::LeftY,
-                    value,
-                    ..
-                } => {
-                    let mut emu_lock = emu.lock().unwrap();
+                // Event::ControllerAxisMotion {
+                //     axis: Axis::LeftX,
+                //     value,
+                //     ..
+                // } => {
+                //     let mut emu_lock = emu.lock().unwrap();
 
-                    if value > AXIS_DEAD_ZONE {
-                        emu_lock.set_button(InputBtn::Down, true);
-                    } else if value < -AXIS_DEAD_ZONE {
-                        emu_lock.set_button(InputBtn::Up, true);
-                    } else {
-                        emu_lock.set_button(InputBtn::Up, false);
-                        emu_lock.set_button(InputBtn::Down, false);
-                    }
-                }
+                //     if value > AXIS_DEAD_ZONE {
+                //         emu_lock.set_button(InputBtn::Right, true);
+                //     } else if value < -AXIS_DEAD_ZONE {
+                //         emu_lock.set_button(InputBtn::Left, true);
+                //     } else {
+                //         emu_lock.set_button(InputBtn::Left, false);
+                //         emu_lock.set_button(InputBtn::Right, false);
+                //     }
+                // }
+                // Event::ControllerAxisMotion {
+                //     axis: Axis::LeftY,
+                //     value,
+                //     ..
+                // } => {
+                //     let mut emu_lock = emu.lock().unwrap();
 
+                //     if value > AXIS_DEAD_ZONE {
+                //         emu_lock.set_button(InputBtn::Down, true);
+                //     } else if value < -AXIS_DEAD_ZONE {
+                //         emu_lock.set_button(InputBtn::Up, true);
+                //     } else {
+                //         emu_lock.set_button(InputBtn::Up, false);
+                //         emu_lock.set_button(InputBtn::Down, false);
+                //     }
+                // }
                 Event::ControllerDeviceAdded { which, .. } => match controller.open(which) {
                     Ok(controller) => {
                         println!("Found controller: {}\n", controller.name());
@@ -223,10 +217,11 @@ fn main() {
         {
             let mut emu_lock = emu.lock().unwrap();
 
-            emu_lock.step_until_frame_ready().unwrap();
+            emu_lock.step_until_frame_ready();
 
             tex.with_lock(None, |pixels, _| {
-                pixels.copy_from_slice(emu_lock.get_video_rgba());
+                println!("{} {}", 256 * 256 * 4, pixels.len());
+                emu_lock.get_tilesmap_rgba(pixels);
             })
             .unwrap();
         }

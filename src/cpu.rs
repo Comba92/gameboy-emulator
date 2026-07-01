@@ -38,6 +38,10 @@ pub struct CpuSm83 {
 impl CpuSm83 {
     pub fn new() -> Self {
         Self {
+            a: 1,
+            f: FlagsBuilder::new().with_zero(true).with_neg(false).build(),
+            pc: 0x100,
+            sp: 0xfffe,
             ..Default::default()
         }
     }
@@ -45,7 +49,7 @@ impl CpuSm83 {
 
 impl GbEmulator {
     pub fn cpu_step(&mut self) {
-        // self.handle_interrupts();
+        self.handle_interrupts();
         if self.cpu.ei {
             self.cpu.ime = true;
             self.cpu.ei = false;
@@ -59,8 +63,35 @@ impl GbEmulator {
         self.decode_n_execute(opcode);
     }
 
-    pub fn tick(&mut self) {
+    pub fn handle_interrupts(&mut self) {
+        if !self.cpu.ime {
+            return;
+        }
+
+        let ints = self.bus.inte.into_bits() & self.bus.intf.into_bits();
+        let intr = ints.trailing_zeros();
+
+        if intr < 5 {
+            // we onl have 5 kinds of interrupts!
+            self.cpu.ime = false;
+            self.bus.intf.set_bit(intr, false);
+
+            self.tick();
+            self.tick();
+            self.stack_push(self.cpu.pc);
+            self.cpu.pc = 0x40 | (intr << 3) as u16;
+            self.tick();
+        }
+    }
+
+    fn tick(&mut self) {
         self.cpu.mcycles += 1;
+
+        self.serial_step();
+        self.ppu_step();
+        self.ppu_step();
+        self.ppu_step();
+        self.ppu_step();
     }
 }
 
