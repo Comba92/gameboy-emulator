@@ -42,14 +42,14 @@ fn main() {
     canvas.set_logical_size(256, 256).unwrap();
     let texture_creator = canvas.texture_creator();
     let mut tex = texture_creator
-        .create_texture_streaming(PixelFormatEnum::RGBA32, 256, 256)
+        .create_texture_streaming(PixelFormatEnum::RGBA32, 160, 144)
         .unwrap();
     tex.set_scale_mode(ScaleMode::Nearest);
 
     println!("Current dir: {:?}", std::env::current_dir());
 
-    let mut bios_path = PathBuf::from("roms/dmg_boot.bin");
-    let mut rom_path = PathBuf::from("roms/dmg-acid2.gb");
+    let mut bios_path = PathBuf::from("../roms/dmg_boot.bin");
+    let mut rom_path = PathBuf::from("../roms/dmg-acid2.gb");
 
     // let emu = GbEmulator::load_bios_only(Some(bios)).unwrap();
     // let emu = GbEmulator::load_rom_from_file(&rom_path, Some(bios)).unwrap();
@@ -221,7 +221,7 @@ fn main() {
             emu_lock.step_until_frame_ready();
 
             tex.with_lock(None, |pixels, _| {
-                emu_lock.get_tilesmap_rgba(pixels);
+                pixels.copy_from_slice(emu_lock.get_video_rgba());
             })
             .unwrap();
         }

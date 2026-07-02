@@ -1,5 +1,10 @@
 use crate::{
-    bus::Bus, cpu::CpuSm83, joypad::Joypad, ppu::{DMG_PALETTE, Ppu}, rom::{Cart, RomData, is_valid_bios}, serial::Serial
+    bus::Bus,
+    cpu::CpuSm83,
+    joypad::Joypad,
+    ppu::{DMG_PALETTE, Ppu},
+    rom::{Cart, RomData, is_valid_bios},
+    serial::Serial,
 };
 use std::path::Path;
 

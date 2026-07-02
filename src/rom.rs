@@ -35,8 +35,8 @@ enum ConsoleMode {
 #[derive(Default, Debug, Clone)]
 enum Region {
     #[default]
-    Japan,
     World,
+    Oversea,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -66,6 +66,7 @@ impl RomData {
         let mut header = RomData::default();
         header.title = String::from_utf8_lossy(&bytes[0x134..0x144])
             .trim()
+            .trim_matches(|c: char| c.is_control())
             .to_string();
 
         header.mode = match bytes[0x143] {
@@ -93,8 +94,8 @@ impl RomData {
             _ => 0,
         };
         header.region = match bytes[0x14a] {
-            0x1 => Region::World,
-            _ => Region::Japan,
+            0x1 => Region::Oversea,
+            _ => Region::World,
         };
 
         header.revision = bytes[0x14c];

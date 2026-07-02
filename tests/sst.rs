@@ -42,7 +42,7 @@ fn cpu_to_mock(emu: &mut GbEmulator, mock: &CpuTestState) -> CpuTestState {
         pc: cpu.pc,
         sp: cpu.sp,
         a: cpu.a,
-        f: cpu.f.clone().into_bits(),
+        f: cpu.f.into_bits(),
         b: cpu.bc.hi(),
         c: cpu.bc.lo(),
         d: cpu.de.hi(),
@@ -110,7 +110,7 @@ fn cpu_test(emu: &mut GbEmulator, test: &CpuTest) -> bool {
 }
 
 #[test]
-fn exec_test() {
+fn exec_one_test() {
     let test: Vec<CpuTest> = serde_json::from_str(include_str!("./sm83/v1/a9.json")).unwrap();
 
     let mut emu = emu::GbEmulator::debug();

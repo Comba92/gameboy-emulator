@@ -1,8 +1,8 @@
 use crate::{
     emu::GbEmulator,
+    ppu,
     rom::{Cart, RomData},
     serial,
-    ppu,
 };
 use bitfields::bitfield;
 
@@ -105,11 +105,13 @@ impl Bus {
             map: DEFAULT_MAP,
         };
 
+        println!("{:?}", res.header);
+
         // at boot bios is mapped to the first 0x100 bytes
         // swap bios out with the first 0x100, set them back later
-        let tmp = res.rom[..0x0100].to_vec();
-        res.rom[..0x0100].copy_from_slice(&bios);
-        res.bios = Some(tmp.into_boxed_slice());
+        // let tmp = res.rom[..0x0100].to_vec();
+        // res.rom[..0x0100].copy_from_slice(&bios);
+        // res.bios = Some(tmp.into_boxed_slice());
 
         res
     }
@@ -149,7 +151,7 @@ impl GbEmulator {
 
         let handler = addr >> 12;
         match bus.map[handler as usize] {
-            Handler::Rom => bus.rom[addr as usize] = val,
+            Handler::Rom => {}
             Handler::Vram => bus.vram[addr as usize - 0x8000] = val,
             Handler::Sram => {}
             Handler::Wram => bus.wram[addr as usize - 0xc000] = val,
@@ -181,6 +183,10 @@ impl GbEmulator {
             0xff43 => self.ppu.scx,
             0xff44 => self.ppu.ly,
 
+            0xff47 => self.ppu.bgp,
+            0xff4a => self.ppu.wy,
+            0xff4b => self.ppu.wx,
+
             0xffff => self.bus.inte.into_bits(),
             _ => 0xff,
         }
@@ -190,26 +196,29 @@ impl GbEmulator {
         match addr {
             0xff00 => self.joy.write(val),
             0xff01 => self.serial.data = val,
-            0xff02 => self.serial.ctrl = serial::Ctrl::from(val),
+            0xff02 => {
+                self.serial.ctrl = serial::Ctrl::from(val);
+                if self.serial.ctrl.transfer_enable() {
+                    self.serial.out_buffer.push(self.serial.data);
+                    let str = String::from_utf8_lossy(&self.serial.out_buffer);
+                    println!("{str}");
+                }
+            }
             0xff0f => self.bus.intf = IntFlags::from(val),
 
-            // 0xff40 => {
-            //     todo!("lcdc w")
-            // }
+            0xff40 => self.ppu.lcdc = ppu::Ctrl::from(val),
 
-            // 0xff41 => {
-            //     todo!("stat w") // only bits from 6 to 3 are writable
-            // }
+            0xff41 => {
+                self.ppu.stat.set_bits_range(3, 4, val); // only bits from 6 to 3 are writable
+            }
 
-            // 0xff42 => {
-            //     todo!("scy w")
-            // }
+            0xff42 => self.ppu.scy = val,
+            0xff43 => self.ppu.scx = val,
+            0xff47 => self.ppu.bgp = val,
+            0xff4a => self.ppu.wy = val,
+            0xff4b => self.ppu.wx = val,
 
-            // 0xff43 => {
-            //     todo!("scx w")
-            // }
             0xff50 => {
-                println!("BIOS UNMAPPED");
                 if let Some(boot) = self.bus.bios.take() {
                     self.bus.rom[..0x100].copy_from_slice(&boot);
                 }

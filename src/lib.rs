@@ -1,4 +1,4 @@
-use crate::{emu::GbEmulator};
+use crate::emu::GbEmulator;
 
 mod bus;
 pub mod cpu;
@@ -21,6 +21,7 @@ mod serial {
     pub struct Serial {
         pub data: u8,
         pub ctrl: Ctrl,
+        pub out_buffer: Vec<u8>,
 
         pub clock_count: f32,
         pub sent: u8,
@@ -30,6 +31,7 @@ mod serial {
             Self {
                 data: 0xff,
                 ctrl: Ctrl::new(),
+                out_buffer: Vec::new(),
                 clock_count: 0.0,
                 sent: 0,
             }
@@ -67,9 +69,7 @@ mod joypad {
         }
 
         pub fn read(&self) -> u8 {
-            (self.btns_select as u8) << 5 |
-            (self.dpad_select as u8) << 4 |
-            0xf
+            (self.btns_select as u8) << 5 | (self.dpad_select as u8) << 4 | 0xf
         }
 
         pub fn write(&mut self, val: u8) {
