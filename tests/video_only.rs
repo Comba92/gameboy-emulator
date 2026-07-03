@@ -221,7 +221,7 @@ fn main() {
 
             tex.with_lock(None, |pixels, _| {
                 println!("{} {}", 256 * 256 * 4, pixels.len());
-                emu_lock.get_tilesmap_rgba(pixels);
+                emu_lock.get_tileset_rgba(pixels);
             })
             .unwrap();
         }

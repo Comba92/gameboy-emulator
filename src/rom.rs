@@ -24,7 +24,7 @@ impl Cart {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq)]
 enum ConsoleMode {
     #[default]
     DMG,
@@ -41,14 +41,14 @@ enum Region {
 
 #[derive(Default, Debug, Clone)]
 pub struct RomData {
-    title: String,
-    revision: u8,
-    mode: ConsoleMode,
-    sgb: bool,
-    mapper: u8,
-    rom_size: usize,
-    ram_size: usize,
-    region: Region,
+    pub title: String,
+    pub revision: u8,
+    pub mode: ConsoleMode,
+    pub sgb: bool,
+    pub mapper: u8,
+    pub rom_size: usize,
+    pub ram_size: usize,
+    pub region: Region,
 }
 impl RomData {
     const MAGIC: [u8; 48] = [
@@ -57,6 +57,10 @@ impl RomData {
         0xD9, 0x99, 0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB,
         0xB9, 0x33, 0x3E,
     ];
+
+    pub fn is_cgb(&self) -> bool {
+        self.mode != ConsoleMode::DMG
+    }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, &'static str> {
         if !is_valid_rom(bytes) {

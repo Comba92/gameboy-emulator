@@ -62,6 +62,7 @@ pub(crate) struct Bus {
     pub inte: IntFlags,
 
     pub(crate) hram: [u8; 128],
+    pub(crate) oam: [u8; 160],
     pub(crate) vram: Box<[u8]>,
     pub(crate) sram: Box<[u8]>,
     pub(crate) wram: Box<[u8]>,
@@ -80,6 +81,7 @@ impl Bus {
             inte: IntFlags::new(),
 
             hram: [0; _],
+            oam: [0; _],
             vram: Default::default(),
             sram: Default::default(),
             wram: vec![0; 64 * 1024].into_boxed_slice(),
@@ -98,6 +100,7 @@ impl Bus {
             inte: IntFlags::new(),
 
             hram: [0; _],
+            oam: [0; _],
             vram: vec![0; 8 * 1024].into_boxed_slice(),
             sram: Default::default(),
             wram: vec![0; 8 * 1024].into_boxed_slice(),
@@ -138,7 +141,13 @@ impl GbEmulator {
         let handler = addr >> 12;
         match bus.map[handler as usize] {
             Handler::Rom => bus.rom[addr as usize],
-            Handler::Vram => bus.vram[addr as usize - 0x8000],
+            Handler::Vram => {
+                // if self.ppu.stat.mode() != ppu::Mode::Drawing {
+                bus.vram[addr as usize - 0x8000]
+                // } else {
+                // 0xff
+                // }
+            }
             Handler::Sram => 0,
             Handler::Wram => bus.wram[addr as usize - 0xc000],
             Handler::IO => self.io_read(addr),
@@ -151,8 +160,12 @@ impl GbEmulator {
 
         let handler = addr >> 12;
         match bus.map[handler as usize] {
-            Handler::Rom => {}
-            Handler::Vram => bus.vram[addr as usize - 0x8000] = val,
+            Handler::Rom => self.prg_write(addr, val),
+            Handler::Vram => {
+                // if self.ppu.stat.mode() != ppu::Mode::Drawing {
+                bus.vram[addr as usize - 0x8000] = val
+                // }
+            }
             Handler::Sram => {}
             Handler::Wram => bus.wram[addr as usize - 0xc000] = val,
             Handler::IO => self.io_write(addr, val),
@@ -166,7 +179,7 @@ impl GbEmulator {
             return 0xff;
         } else if addr <= 0xfe9f {
             // OAM
-            return 0xff; // TODO
+            return self.bus.oam[addr as usize - 0xfe00];
         } else if addr >= 0xff80 && addr <= 0xffee {
             return self.bus.hram[addr as usize - 0xff80];
         }
@@ -182,8 +195,11 @@ impl GbEmulator {
             0xff42 => self.ppu.scy,
             0xff43 => self.ppu.scx,
             0xff44 => self.ppu.ly,
+            0xff45 => self.ppu.lyc,
 
             0xff47 => self.ppu.bgp,
+            0xff48 => self.ppu.obp0,
+            0xff49 => self.ppu.obp1,
             0xff4a => self.ppu.wy,
             0xff4b => self.ppu.wx,
 
@@ -193,6 +209,13 @@ impl GbEmulator {
     }
 
     fn io_write(&mut self, addr: u16, val: u8) {
+        if addr >= 0xfe00 && addr <= 0xfe9f {
+            // OAM
+            self.bus.oam[addr as usize - 0xfe00] = val;
+        } else if addr >= 0xff80 && addr <= 0xffee {
+            self.bus.hram[addr as usize - 0xff80] = val;
+        }
+
         match addr {
             0xff00 => self.joy.write(val),
             0xff01 => self.serial.data = val,
@@ -206,18 +229,30 @@ impl GbEmulator {
             }
             0xff0f => self.bus.intf = IntFlags::from(val),
 
-            0xff40 => self.ppu.lcdc = ppu::Ctrl::from(val),
+            0xff40 => {
+                self.ppu.lcdc = ppu::Ctrl::from(val);
+            }
 
             0xff41 => {
-                self.ppu.stat.set_bits_range(3, 4, val); // only bits from 6 to 3 are writable
+                // only bits from 6 to 3 are writable
+                self.ppu.stat.set_lyc_int(val & 0x40 != 0);
+                self.ppu.stat.set_mode2_int(val & 0x20 != 0);
+                self.ppu.stat.set_mode1_int(val & 0x10 != 0);
+                self.ppu.stat.set_mode0_int(val & 0x8 != 0);
             }
 
             0xff42 => self.ppu.scy = val,
             0xff43 => self.ppu.scx = val,
+            0xff45 => self.ppu.lyc = val,
+            0xff46 => {
+                println!("DMA REQUEST");
+                self.dma.write(val);
+            }
             0xff47 => self.ppu.bgp = val,
+            0xff48 => self.ppu.obp0 = val,
+            0xff49 => self.ppu.obp1 = val,
             0xff4a => self.ppu.wy = val,
             0xff4b => self.ppu.wx = val,
-
             0xff50 => {
                 if let Some(boot) = self.bus.bios.take() {
                     self.bus.rom[..0x100].copy_from_slice(&boot);
@@ -229,4 +264,44 @@ impl GbEmulator {
             _ => {}
         }
     }
+
+    pub fn prg_write(&mut self, addr: u16, val: u8) {
+        match &mut self.mbc {
+            Mbc::None => {}
+            Mbc::MBC1(m) => {
+                if addr <= 0x1fff {
+                    m.ram_enable = val & 0xf == 0xa;
+                } else if addr <= 0x3fff {
+                } else if addr <= 0x5fff {
+                } else {
+                    m.mode = val & 1 != 0;
+                }
+            }
+        }
+    }
+}
+
+pub enum Mbc {
+    None,
+    MBC1(Mbc1),
+}
+
+impl Mbc {
+    pub fn new(id: u8) -> Result<Self, &'static str> {
+        let res = match id {
+            0x00 | 0x08 | 0x09 => Mbc::None,
+            0x01 | 0x02 | 0x03 => Mbc::MBC1(Mbc1::default()),
+            _ => return Err("mapper not implemented"),
+        };
+
+        Ok(res)
+    }
+}
+
+#[derive(Default)]
+struct Mbc1 {
+    ram_enable: bool,
+    mode: bool,
+    rom_bank: u16,
+    ram_bank: u16,
 }

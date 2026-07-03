@@ -28,7 +28,7 @@ fn main() {
     // let timer = sdl.timer().unwrap();
 
     let window = video
-        .window("NesEmu", 256 * 3, 256 * 3)
+        .window("GbEmu", 256 * 3, 256 * 3)
         .position_centered()
         .resizable()
         .build()
@@ -222,6 +222,8 @@ fn main() {
 
             tex.with_lock(None, |pixels, _| {
                 pixels.copy_from_slice(emu_lock.get_video_rgba());
+                // emu_lock.get_tileset_rgba(pixels);
+                // emu_lock.get_tilemap_rgba(pixels);
             })
             .unwrap();
         }

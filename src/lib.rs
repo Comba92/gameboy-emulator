@@ -39,6 +39,27 @@ mod serial {
     }
 }
 
+mod dma {
+    pub struct Dma {
+        pub init_cycle: bool,
+        pub addr: Option<u16>,
+    }
+
+    impl Dma {
+        pub fn new() -> Self {
+            Self {
+                init_cycle: false,
+                addr: None,
+            }
+        }
+
+        pub fn write(&mut self, val: u8) {
+            self.init_cycle = true;
+            self.addr = Some((val as u16) << 8);
+        }
+    }
+}
+
 mod joypad {
     use bitfields::bitfield;
 
@@ -97,6 +118,28 @@ impl GbEmulator {
                 }
             }
             serial.clock_count += 4.0; // 1 mcycle is 4 tcycles
+        }
+    }
+
+    pub(crate) fn dma_step(&mut self) {
+        let dma = &mut self.dma;
+
+        if let Some(addr) = dma.addr {
+            if dma.init_cycle {
+                dma.init_cycle = false;
+                dma.addr = Some(addr);
+                return;
+            }
+
+            let val = self.dispatch_read(addr);
+            let offset = addr & 0x00ff;
+            self.dispatch_write(0xfe00 | offset, val);
+
+            if offset == 255 {
+                self.dma.addr = None;
+            } else {
+                self.dma.addr = Some(addr + 1);
+            }
         }
     }
 }

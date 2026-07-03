@@ -18,7 +18,8 @@ pub struct Ctrl {
 }
 
 #[bitflag(u8)]
-enum Mode {
+#[derive(PartialEq)]
+pub enum Mode {
     HBlank = 0,
     #[base]
     VBlank = 1,
@@ -87,8 +88,8 @@ enum FifoState {
 #[derive(Default)]
 struct Fetcher {
     state: FifoState,
-    wnd: bool,
     pos: u8,
+    wnd: bool,
     fifo: VecDeque<FifoPixel>,
 }
 impl Fetcher {
@@ -100,7 +101,35 @@ impl Fetcher {
     }
 }
 
-#[derive(Default)]
+#[bitfield(u8)]
+struct ObjAttr {
+    #[bits(3)]
+    cgb_palette: u8,
+    bank: bool,
+    dmg_palette: bool,
+    flip_x: bool,
+    flip_y: bool,
+    priority: bool,
+}
+
+#[derive(Default, Clone)]
+struct Object {
+    y: u8,
+    x: u8,
+    tile_id: u8,
+    attr: ObjAttr,
+}
+impl Object {
+    pub fn from(bytes: &[u8]) -> Self {
+        Self {
+            y: bytes[0],
+            x: bytes[1],
+            tile_id: bytes[2],
+            attr: ObjAttr::from(bytes[3]),
+        }
+    }
+}
+
 pub struct Ppu {
     pub lcdc: Ctrl,
     pub ly: u8,
@@ -110,25 +139,46 @@ pub struct Ppu {
     pub scx: u8,
     pub wy: u8,
     pub wx: u8,
-    wly: u8,
+    wlc: u8,
     wy_eq_ly: bool,
-    wnd_rendering: bool,
+    stat_intr: bool,
 
     pub bgp: u8,
     pub obp0: u8,
     pub obp1: u8,
 
-    pub dot: u16,
+    pub dot: i16,
     pixel_idx: usize,
-    shifer_pos: u8,
+    shifter_pos: u8,
 
     fetcher: Fetcher,
+    objects: [Object; 40],
 }
 
 impl Ppu {
     pub fn new() -> Self {
         Self {
-            ..Default::default()
+            lcdc: Ctrl::new(),
+            ly: 0,
+            lyc: 0,
+            stat: Stat::new(),
+            scy: 0,
+            scx: 0,
+            wy: 0,
+            wx: 0,
+            wlc: 0,
+            wy_eq_ly: false,
+            stat_intr: false,
+
+            bgp: 0,
+            obp0: 0,
+            obp1: 0,
+            dot: 0,
+            pixel_idx: 0,
+            shifter_pos: 0,
+
+            fetcher: Fetcher::default(),
+            objects: std::array::from_fn(|_| Object::default()),
         }
     }
 
@@ -142,10 +192,6 @@ impl Ppu {
             (0x9000 + offset) as u16
         }
     }
-
-    pub fn is_wnd_visible(&self) -> bool {
-        self.lcdc.wnd_enable() && self.wx <= 166 && self.wy <= 143
-    }
 }
 
 impl GbEmulator {
@@ -156,15 +202,17 @@ impl GbEmulator {
         match fetcher.state {
             TileWait => fetcher.state = Tile,
             Tile => {
-                let x = (self.ppu.scx / 8 + fetcher.pos) % 32;
-                let (y, tilemap) = if fetcher.wnd {
+                let (x, y, tilemap) = if fetcher.wnd {
                     let tilemap = if self.ppu.lcdc.wnd_map() {
                         0x9c00
                     } else {
                         0x9800
                     };
 
-                    (32 * (self.ppu.wly as u16 / 8), tilemap)
+                    let x = fetcher.pos;
+                    let y = 32 * (self.ppu.wlc as u16 / 8);
+
+                    (x, y, tilemap)
                 } else {
                     let tilemap = if self.ppu.lcdc.bg_map() {
                         0x9c00
@@ -172,8 +220,10 @@ impl GbEmulator {
                         0x9800
                     };
 
-                    let y = (self.ppu.ly as u16 + self.ppu.scy as u16) % 256; // y with scroll
-                    (32 * (y / 8), tilemap)
+                    let x = (self.ppu.scx / 8 + fetcher.pos) % 32;
+                    let y_with_scroll = (self.ppu.ly as u16 + self.ppu.scy as u16) % 256; // y with scroll
+                    let y = 32 * (y_with_scroll / 8);
+                    (x, y, tilemap)
                 };
 
                 let offset = (y + x as u16) % 1024;
@@ -185,7 +235,7 @@ impl GbEmulator {
             DataLoWait { tile_id } => fetcher.state = DataLo { tile_id },
             DataLo { tile_id } => {
                 let offset = if fetcher.wnd {
-                    2 * (self.ppu.wly as u16 % 8)
+                    2 * (self.ppu.wlc as u16 % 8)
                 } else {
                     2 * ((self.ppu.ly as u16 + self.ppu.scy as u16) % 8)
                 };
@@ -219,7 +269,7 @@ impl GbEmulator {
 
             Push { tile_lo, tile_hi } => {
                 if fetcher.fifo.len() <= 8 {
-                    for i in 0..8 {
+                    for i in (0..8).rev() {
                         let lo = (tile_lo >> i) & 1;
                         let hi = (tile_hi >> i) & 1;
                         let color = (hi << 1) | lo;
@@ -231,7 +281,7 @@ impl GbEmulator {
                         fetcher.fifo.push_back(pixel);
                     }
 
-                    if self.ppu.dot <= 92 {
+                    if self.ppu.scx % 8 > 0 && self.ppu.dot <= 92 {
                         // discard scx % 8 pixels of first tile pushed
                         fetcher.state = Discard {
                             count: self.ppu.scx % 8,
@@ -260,8 +310,57 @@ impl GbEmulator {
         }
 
         let pixel = self.ppu.fetcher.fifo.pop_front().unwrap();
-        self.push_pixel(pixel.color());
-        self.ppu.shifer_pos += 1;
+        let color_id = (self.ppu.bgp >> (2 * pixel.color())) & 0x3;
+        self.push_pixel(color_id);
+        self.ppu.shifter_pos += 1;
+    }
+
+    fn enter_scanline(&mut self) {
+        let ppu = &mut self.ppu;
+
+        ppu.stat.set_mode(Mode::OAMScan);
+        ppu.fetcher.reset();
+        ppu.shifter_pos = 0;
+
+        if ppu.wy == ppu.ly {
+            ppu.wy_eq_ly = true;
+        }
+    }
+
+    fn enter_hblank(&mut self) {
+        let ppu = &mut self.ppu;
+        ppu.stat.set_mode(Mode::HBlank);
+    }
+
+    fn enter_vblank(&mut self) {
+        let ppu = &mut self.ppu;
+
+        ppu.stat.set_mode(Mode::VBlank);
+        self.bus.intf.set_vblank(true);
+
+        std::mem::swap(
+            &mut self.output.videobuf_view,
+            &mut self.output.videobuf_back,
+        );
+
+        self.output.frame_ready = true;
+    }
+
+    fn update_stat_intr(&mut self) {
+        let ppu = &mut self.ppu;
+
+        ppu.stat.set_lyc_eq_ly(ppu.ly == ppu.lyc);
+
+        let intr = (ppu.stat.lyc_int() && ppu.stat.lyc_eq_ly())
+            || (ppu.stat.mode0_int() && ppu.stat.mode() == Mode::HBlank)
+            || (ppu.stat.mode1_int() && ppu.stat.mode() == Mode::VBlank)
+            || (ppu.stat.mode2_int() && ppu.stat.mode() == Mode::OAMScan);
+
+        if !ppu.stat_intr && intr {
+            self.bus.intf.set_lcd(true);
+        }
+
+        self.ppu.stat_intr = intr;
     }
 
     pub fn ppu_step(&mut self) {
@@ -275,21 +374,23 @@ impl GbEmulator {
             }
 
             Mode::Drawing => {
-                if self.ppu.lcdc.wnd_enable()
-                    && self.ppu.wy_eq_ly
-                    && self.ppu.shifer_pos + 7 >= self.ppu.wx
-                {
-                    // we've reached the window
-                    self.ppu.fetcher.reset();
-                    self.ppu.fetcher.wnd = true;
-                }
+                // if !ppu.fetcher.wnd
+                //     && ppu.lcdc.bg_wnd_priority()
+                //     && ppu.lcdc.wnd_enable()
+                //     && ppu.wy_eq_ly
+                //     && ppu.shifer_pos + 7 == ppu.wx
+                // {
+                //     // we've reached the window
+                //     ppu.fetcher.reset();
+                //     // a 6-dot penalty is incurred while the BG fetcher is being set up for the window.
+                //     // ppu.fetcher.state = FifoState::Discard { count: 6 };
+                //     ppu.fetcher.wnd = true;
+                // }
 
-                self.fetcher_tick();
                 self.render_pixel();
-                if self.ppu.shifer_pos >= 160 {
-                    self.ppu.fetcher.reset();
-                    self.ppu.shifer_pos = 0;
-                    self.ppu.stat.set_mode(Mode::HBlank);
+                self.fetcher_tick();
+                if self.ppu.shifter_pos >= 160 {
+                    self.enter_hblank();
                 }
             }
 
@@ -297,20 +398,15 @@ impl GbEmulator {
                 if ppu.dot >= 456 {
                     ppu.dot = 0;
                     ppu.ly += 1;
+
+                    if ppu.fetcher.wnd {
+                        ppu.wlc += 1;
+                    }
+
                     if ppu.ly >= 144 {
-                        ppu.stat.set_mode(Mode::VBlank);
-                        ppu.pixel_idx = 0;
-                        ppu.wnd_rendering = false;
-
-                        self.bus.intf.set_vblank(true);
-                        std::mem::swap(
-                            &mut self.output.videobuf_view,
-                            &mut self.output.videobuf_back,
-                        );
-
-                        self.output.frame_ready = true;
+                        self.enter_vblank();
                     } else {
-                        ppu.stat.set_mode(Mode::OAMScan);
+                        self.enter_scanline();
                     }
                 }
             }
@@ -319,14 +415,21 @@ impl GbEmulator {
                 if ppu.dot >= 456 {
                     ppu.dot = 0;
                     ppu.ly += 1;
+
                     if ppu.ly >= 154 {
                         ppu.ly = 0;
-                        ppu.stat.set_mode(Mode::OAMScan);
+                        ppu.wlc = 0;
+                        ppu.pixel_idx = 0;
+                        ppu.wy_eq_ly = false;
+
+                        self.enter_scanline();
                     }
                 }
             }
         }
 
+        // TODO: warning: we are increasing after setting to 0
         self.ppu.dot += 1;
+        self.update_stat_intr();
     }
 }
