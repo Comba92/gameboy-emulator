@@ -185,10 +185,10 @@ impl Ppu {
     pub fn tile_addr(&self, tile_id: u8) -> u16 {
         if self.lcdc.bg_wnd_tiles() {
             // unsigned mode
-            0x8000 | (tile_id as u16 * 16)
+            0x8000 | (16 * tile_id as u16)
         } else {
             // signed mode
-            let offset = tile_id as i8 as i32;
+            let offset = 16 * tile_id as i8 as i32;
             (0x9000 + offset) as u16
         }
     }
@@ -309,9 +309,14 @@ impl GbEmulator {
             return;
         }
 
-        let pixel = self.ppu.fetcher.fifo.pop_front().unwrap();
-        let color_id = (self.ppu.bgp >> (2 * pixel.color())) & 0x3;
-        self.push_pixel(color_id);
+        if self.ppu.lcdc.bg_wnd_priority() {
+            let pixel = self.ppu.fetcher.fifo.pop_front().unwrap();
+            let color_id = (self.ppu.bgp >> (2 * pixel.color())) & 0x3;
+            self.push_pixel(color_id);
+        } else {
+            self.push_pixel(0);
+        }
+
         self.ppu.shifter_pos += 1;
     }
 
@@ -374,18 +379,18 @@ impl GbEmulator {
             }
 
             Mode::Drawing => {
-                // if !ppu.fetcher.wnd
-                //     && ppu.lcdc.bg_wnd_priority()
-                //     && ppu.lcdc.wnd_enable()
-                //     && ppu.wy_eq_ly
-                //     && ppu.shifer_pos + 7 == ppu.wx
-                // {
-                //     // we've reached the window
-                //     ppu.fetcher.reset();
-                //     // a 6-dot penalty is incurred while the BG fetcher is being set up for the window.
-                //     // ppu.fetcher.state = FifoState::Discard { count: 6 };
-                //     ppu.fetcher.wnd = true;
-                // }
+                if !ppu.fetcher.wnd
+                    && ppu.lcdc.bg_wnd_priority()
+                    && ppu.lcdc.wnd_enable()
+                    && ppu.wy_eq_ly
+                    && ppu.shifter_pos + 7 == ppu.wx
+                {
+                    // we've reached the window
+                    ppu.fetcher.reset();
+                    // a 6-dot penalty is incurred while the BG fetcher is being set up for the window.
+                    // ppu.fetcher.state = FifoState::Discard { count: 6 };
+                    ppu.fetcher.wnd = true;
+                }
 
                 self.render_pixel();
                 self.fetcher_tick();

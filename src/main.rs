@@ -48,12 +48,16 @@ fn main() {
 
     println!("Current dir: {:?}", std::env::current_dir());
 
-    let mut bios_path = PathBuf::from("../roms/dmg_boot.bin");
+    let mut bios_path = PathBuf::from("utils/dmg_boot.bin");
     let mut rom_path = PathBuf::from("../roms/dmg-acid2.gb");
 
     // let emu = GbEmulator::load_bios_only(Some(bios)).unwrap();
     // let emu = GbEmulator::load_rom_from_file(&rom_path, Some(bios)).unwrap();
-    let emu = GbEmulator::load_rom_from_file(&rom_path, Some(&bios_path)).unwrap();
+    let emu = GbEmulator::builder()
+        .with_rom_file(&rom_path)
+        .with_bios_file(Some(&bios_path))
+        .build()
+        .unwrap();
 
     let frame_rate = time::Duration::from_secs_f32(1.0 / emu::FRAME_RATE);
     let emu = arc_mutex(emu);
@@ -73,7 +77,11 @@ fn main() {
                     if filename.ends_with(".bin") {
                         bios_path = PathBuf::from(&filename);
                     } else {
-                        let new_emu = GbEmulator::load_rom_from_file(&filename, Some(&bios_path));
+                        let new_emu = GbEmulator::builder()
+                            .with_rom_file(&rom_path)
+                            .with_bios_file(Some(&bios_path))
+                            .build();
+
                         match new_emu {
                             Ok(res) => {
                                 let mut emu_lock = emu.lock().unwrap();

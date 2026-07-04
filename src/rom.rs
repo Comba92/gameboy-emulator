@@ -1,3 +1,5 @@
+use crate::emu::LoadError;
+
 pub(crate) struct Cart {
     pub header: RomData,
     pub rom: Vec<u8>,
@@ -16,7 +18,7 @@ impl Default for Cart {
 }
 
 impl Cart {
-    pub fn from(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, LoadError> {
         Ok(Self {
             header: RomData::parse(bytes)?,
             rom: bytes.to_vec(),
@@ -112,7 +114,7 @@ pub fn is_valid_rom(bytes: &[u8]) -> bool {
     bytes.len() > 0x14f && &bytes[0x104..0x104 + RomData::MAGIC.len()] == RomData::MAGIC
 }
 
-// TODO: use bios CRC
+// TODO: use bios CRCs
 pub fn is_valid_bios(bios: &[u8]) -> bool {
     bios.len() == 0x100
 }

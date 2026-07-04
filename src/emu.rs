@@ -7,7 +7,7 @@ use crate::{
     rom::{Cart, RomData, is_valid_bios},
     serial::Serial,
 };
-use std::path::Path;
+use std::{io, path::Path};
 
 pub const DMG_CLOCK_RATE: usize = 4194304;
 pub const CBG_CLOCK_RATE: usize = 2 * DMG_CLOCK_RATE;
@@ -20,21 +20,6 @@ pub const FRAMEBUF_SIZE: usize = SCREEN_WIDTH as usize * SCREEN_HEIGHT as usize 
 pub const AUDIO_FRAMES_BUFFERED: usize = 8;
 
 pub(crate) type LoadError = Box<dyn std::error::Error>;
-
-#[derive(Default)]
-pub(crate) struct GbOutput {
-    pub(crate) frame_ready: bool,
-    pub(crate) frame_number: usize,
-    pub(crate) videobuf_back: Box<Framebuf>,
-    pub(crate) videobuf_view: Box<Framebuf>,
-}
-
-pub(crate) struct Framebuf(pub [u8; FRAMEBUF_SIZE]);
-impl Default for Framebuf {
-    fn default() -> Self {
-        Self([255; _])
-    }
-}
 
 pub struct GbEmulator {
     pub cpu: CpuSm83,
@@ -63,10 +48,10 @@ impl GbEmulator {
     }
 
     pub fn empty() -> Self {
-        Self::new(Cart::default(), None::<&[u8]>).unwrap()
+        Self::new(Cart::default(), None).unwrap()
     }
 
-    fn new<B: AsRef<[u8]>>(game: Cart, bios: Option<B>) -> Result<Self, LoadError> {
+    fn new(game: Cart, bios: Option<Vec<u8>>) -> Result<Self, LoadError> {
         if let Some(bios) = &bios {
             if !is_valid_bios(bios.as_ref()) {
                 return Err("invalid GameBoy boot rom".into());
@@ -79,16 +64,20 @@ impl GbEmulator {
 
             cpu: CpuSm83::new(),
             ppu: Ppu::new(),
-            bus: Bus::new(
-                game,
-                bios.map(|x| x.as_ref().to_vec())
-                    .unwrap_or_else(|| vec![0; 0x100]),
-            ),
+            bus: Bus::new(game, bios.unwrap_or_else(|| vec![0; 0x100])),
             serial: Serial::new(),
             dma: Dma::new(),
             joy: Joypad::new(),
             output: GbOutput::default(),
         })
+    }
+
+    pub fn with_rom<R: AsRef<[u8]>>(rom: R) -> Result<Self, LoadError> {
+        Self::builder().build_with_rom(rom)
+    }
+
+    pub fn builder<'a>() -> GbBuilder<'a> {
+        GbBuilder::default()
     }
 
     pub fn rom_info(&self) -> &RomData {
@@ -106,7 +95,6 @@ impl GbEmulator {
     pub fn step_until_frame_ready(&mut self) {
         self.output.frame_ready = false;
 
-        let cycles = self.cpu.mcycles;
         while !self.output.frame_ready {
             self.step();
         }
@@ -177,80 +165,58 @@ impl GbEmulator {
             }
         }
     }
+}
 
-    pub fn load_rom_from_unzipped_bytes<R: AsRef<[u8]>, B: AsRef<[u8]>>(
-        rom: R,
-        bios: Option<B>,
-    ) -> Result<Self, LoadError> {
-        let game = Cart::from(rom.as_ref())?;
-        Self::new(game, bios)
+#[derive(Default)]
+pub(crate) struct GbOutput {
+    pub(crate) frame_ready: bool,
+    pub(crate) frame_number: usize,
+    pub(crate) videobuf_back: Box<Framebuf>,
+    pub(crate) videobuf_view: Box<Framebuf>,
+}
+
+pub(crate) struct Framebuf(pub [u8; FRAMEBUF_SIZE]);
+impl Default for Framebuf {
+    fn default() -> Self {
+        Self([255; _])
     }
+}
 
-    pub fn load_rom_from_bytes<R: AsRef<[u8]>, B: AsRef<[u8]>>(
-        rom_bytes: R,
-        bios: Option<B>,
-    ) -> Result<Self, LoadError> {
-        match read_zip_file_from_bytes(rom_bytes.as_ref()) {
-            Ok(unzipped_bytes) => Self::load_rom_from_unzipped_bytes(unzipped_bytes, bios), // it is a zip file
-            Err(_) => Self::load_rom_from_unzipped_bytes(rom_bytes, bios), // not a zip file
+pub fn read_file_maybe_zipped<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
+    use io::Read;
+
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut bytes = Vec::new();
+
+    match zip::read::ZipArchive::new(&mut reader) {
+        Ok(mut archive) => {
+            // it is a zip file
+            let mut zip = archive.by_index(0)?;
+            zip.read_to_end(&mut bytes)?;
+            io::Result::Ok(bytes)
         }
-    }
 
-    pub fn load_rom_from_file<R: AsRef<Path>, B: AsRef<Path>>(
-        rom_path: R,
-        bios: Option<B>,
-    ) -> Result<Self, LoadError> {
-        use std::{
-            fs,
-            io::{Read, Seek},
-        };
+        Err(_) => {
+            // not a zip file
+            use std::io::Seek;
 
-        let rom_file = fs::File::open(rom_path)?;
-        let mut bytes = Vec::new();
-        let mut reader = std::io::BufReader::new(rom_file);
-        reader.read_to_end(&mut bytes)?;
-
-        let bios = bios
-            .and_then(|bios_path| fs::File::open(bios_path).ok())
-            .and_then(|bios_file| {
-                let mut bytes = Vec::new();
-                let mut reader = std::io::BufReader::new(bios_file);
-                if let Ok(_) = reader.read_to_end(&mut bytes) {
-                    Some(bytes)
-                } else {
-                    None
-                }
-            });
-
-        let res = Cart::from(&bytes);
-        match res {
-            Ok(game) => Self::new(game, bios),
-            Err(e) => {
-                reader.rewind()?;
-                bytes.clear();
-
-                if let Ok(mut archive) = zip::read::ZipArchive::new(&mut reader) {
-                    // it is a zip file
-                    let mut zip = archive.by_index(0)?;
-                    zip.read_to_end(&mut bytes)?;
-                    GbEmulator::load_rom_from_unzipped_bytes(&bytes, bios)
-                } else {
-                    // not a zip file either
-                    Err(e.into())
-                }
-            }
+            reader.rewind()?;
+            bytes.clear();
+            reader.read_to_end(&mut bytes)?;
+            io::Result::Ok(bytes)
         }
     }
 }
 
-pub fn read_zip_file_from_bytes<B: AsRef<[u8]>>(input: B) -> std::io::Result<Vec<u8>> {
-    use std::io::{self, Read};
-
-    let mut reader = std::io::BufReader::new(input.as_ref());
+pub fn read_zip_file_from_bytes<B: AsRef<[u8]>>(input: B) -> io::Result<Vec<u8>> {
+    let mut reader = io::BufReader::new(input.as_ref());
     let unzipped = zip::read::read_zipfile_from_stream(&mut reader)?;
 
     match unzipped {
         Some(mut zipfile) => {
+            use io::Read;
+
             let mut buf = Vec::new();
             zipfile.read_to_end(&mut buf)?;
             io::Result::Ok(buf)
@@ -261,6 +227,101 @@ pub fn read_zip_file_from_bytes<B: AsRef<[u8]>>(input: B) -> std::io::Result<Vec
                 "file was not present at root of zip directory",
             );
             io::Result::Err(err)
+        }
+    }
+}
+
+pub fn read_bytes_maybe_zipped<B: AsRef<[u8]>>(input: B) -> Vec<u8> {
+    read_zip_file_from_bytes(&input).unwrap_or(input.as_ref().to_owned())
+}
+
+enum RomSource<'a> {
+    Bytes(&'a [u8]),
+    FilePath(&'a Path),
+}
+
+#[derive(Default)]
+pub struct GbBuilder<'a> {
+    rom: Option<RomSource<'a>>,
+    bios: Option<RomSource<'a>>,
+    boot_bios_only: bool,
+}
+
+impl<'a> GbBuilder<'a> {
+    pub fn with_rom<R: 'a + AsRef<[u8]>>(mut self, rom: &'a R) -> Self {
+        self.rom = Some(RomSource::Bytes(rom.as_ref()));
+        self
+    }
+
+    pub fn with_rom_file<P: 'a + AsRef<Path>>(mut self, rom_path: &'a P) -> Self {
+        self.rom = Some(RomSource::FilePath(rom_path.as_ref()));
+        self
+    }
+
+    pub fn with_bios<B: 'a + AsRef<[u8]>>(mut self, bios: Option<&'a B>) -> Self {
+        self.bios = bios.map(|bios| RomSource::Bytes(bios.as_ref()));
+        self
+    }
+
+    pub fn with_bios_file<P: 'a + AsRef<Path>>(mut self, bios_path: Option<&'a P>) -> Self {
+        self.bios = bios_path.map(|path| RomSource::FilePath(path.as_ref()));
+        self
+    }
+
+    pub fn boot_bios_only(mut self, cond: bool) -> Self {
+        self.boot_bios_only = cond;
+        self
+    }
+
+    pub fn build_empty(self) -> GbEmulator {
+        GbEmulator::empty()
+    }
+
+    pub fn build_with_rom<R: 'a + AsRef<[u8]>>(self, rom: R) -> Result<GbEmulator, LoadError> {
+        Self::default().with_rom(&rom).build()
+    }
+
+    pub fn build(self) -> Result<GbEmulator, LoadError> {
+        // games might be zipped!
+
+        let game = if let Some(rom) = self.rom {
+            let res = match rom {
+                RomSource::Bytes(bytes) => read_zip_file_from_bytes(bytes).map_or_else(
+                    |_| Cart::from_bytes(bytes),
+                    |unzipped| Cart::from_bytes(&unzipped),
+                ),
+                RomSource::FilePath(path) => read_file_maybe_zipped(path)
+                    .map_err(|e| e.into())
+                    .and_then(|res| Cart::from_bytes(&res)),
+            };
+            res.map_err(|e| format!("error reading ROM: {e}"))?
+        } else {
+            Cart::default()
+        };
+
+        match self.bios {
+            Some(bios_src) => {
+                let bios = match bios_src {
+                    RomSource::Bytes(bytes) => read_zip_file_from_bytes(bytes)
+                        .map_or_else(|_| bytes.to_owned(), |unzipped| unzipped),
+                    RomSource::FilePath(path) => read_file_maybe_zipped(path)
+                        .map_err(|e| format!("error reading BIOS: {e}"))?,
+                };
+
+                if self.boot_bios_only {
+                    GbEmulator::new(Cart::default(), Some(bios))
+                } else {
+                    GbEmulator::new(game, Some(bios))
+                }
+            }
+
+            None => {
+                if self.boot_bios_only {
+                    Err("no BIOS provided when asked for BIOS only boot".into())
+                } else {
+                    GbEmulator::new(game, None)
+                }
+            }
         }
     }
 }
