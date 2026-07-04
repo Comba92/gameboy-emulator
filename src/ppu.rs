@@ -60,7 +60,7 @@ struct FifoPixel {
 #[derive(Default)]
 enum FifoState {
     #[default]
-    TileWait,
+    Init,
     Tile,
     DataLoWait {
         tile_id: u8,
@@ -87,17 +87,21 @@ enum FifoState {
 
 #[derive(Default)]
 struct Fetcher {
-    state: FifoState,
-    pos: u8,
+    bg_state: FifoState,
+    bg_pos: u8,
     wnd: bool,
-    fifo: VecDeque<FifoPixel>,
+    bg_fifo: VecDeque<FifoPixel>,
+
+    obj_state: FifoState,
+    obj_pos: u8,
+    obj_fifo: VecDeque<FifoPixel>,
 }
 impl Fetcher {
-    pub fn reset(&mut self) {
-        self.state = FifoState::TileWait;
-        self.pos = 0;
+    pub fn reset_obj(&mut self) {
+        self.bg_state = FifoState::Init;
+        self.bg_pos = 0;
         self.wnd = false;
-        self.fifo.clear();
+        self.bg_fifo.clear();
     }
 }
 
@@ -120,7 +124,7 @@ struct Object {
     attr: ObjAttr,
 }
 impl Object {
-    pub fn from(bytes: &[u8]) -> Self {
+    pub fn new(bytes: &[u8]) -> Self {
         Self {
             y: bytes[0],
             x: bytes[1],
@@ -130,6 +134,7 @@ impl Object {
     }
 }
 
+#[derive(Default)]
 pub struct Ppu {
     pub lcdc: Ctrl,
     pub ly: u8,
@@ -149,37 +154,43 @@ pub struct Ppu {
 
     pub dot: i16,
     pixel_idx: usize,
+
+    shifter_paused: bool,
     shifter_pos: u8,
 
     fetcher: Fetcher,
-    objects: [Object; 40],
+    objs: [Object; 10],
+    objs_count: u8,
 }
 
 impl Ppu {
     pub fn new() -> Self {
-        Self {
-            lcdc: Ctrl::new(),
-            ly: 0,
-            lyc: 0,
-            stat: Stat::new(),
-            scy: 0,
-            scx: 0,
-            wy: 0,
-            wx: 0,
-            wlc: 0,
-            wy_eq_ly: false,
-            stat_intr: false,
+        // TODO: consider keeping default impl
+        // Self {
+        //     lcdc: Ctrl::new(),
+        //     ly: 0,
+        //     lyc: 0,
+        //     stat: Stat::new(),
+        //     scy: 0,
+        //     scx: 0,
+        //     wy: 0,
+        //     wx: 0,
+        //     wlc: 0,
+        //     wy_eq_ly: false,
+        //     stat_intr: false,
 
-            bgp: 0,
-            obp0: 0,
-            obp1: 0,
-            dot: 0,
-            pixel_idx: 0,
-            shifter_pos: 0,
+        //     bgp: 0,
+        //     obp0: 0,
+        //     obp1: 0,
+        //     dot: 0,
+        //     pixel_idx: 0,
+        //     shifter_pos: 0,
 
-            fetcher: Fetcher::default(),
-            objects: std::array::from_fn(|_| Object::default()),
-        }
+        //     fetcher: Fetcher::default(),
+        //     objs: std::array::from_fn(|_| Object::default()),
+        //     objs_count: 0,
+        // }
+        Self::default()
     }
 
     pub fn tile_addr(&self, tile_id: u8) -> u16 {
@@ -195,12 +206,32 @@ impl Ppu {
 }
 
 impl GbEmulator {
-    fn fetcher_tick(&mut self) {
+    fn oam_scan_tick(&mut self) {
+        let ppu = &mut self.ppu;
+
+        if ppu.dot % 2 == 0 {
+            return;
+        }
+
+        let obj_idx = ppu.dot as usize / 2;
+        let obj = &self.bus.oam[obj_idx..obj_idx + 4];
+
+        let y = obj[0] as i16;
+        let obj_size = if ppu.lcdc.obj_size() { 16 } else { 8 };
+        let dist = (ppu.ly as i16 + 16) - y;
+        // if y <= ppu.ly + 16 && ppu.ly + 16 < y + obj_size {
+        if 0 <= dist && dist < obj_size && (ppu.objs_count as usize) < ppu.objs.len() {
+            ppu.objs[ppu.objs_count as usize] = Object::new(obj);
+            ppu.objs_count += 1;
+        }
+    }
+
+    fn bg_fetcher_tick(&mut self) {
         use FifoState::*;
         let fetcher = &mut self.ppu.fetcher;
 
-        match fetcher.state {
-            TileWait => fetcher.state = Tile,
+        match fetcher.bg_state {
+            Init => fetcher.bg_state = Tile,
             Tile => {
                 let (x, y, tilemap) = if fetcher.wnd {
                     let tilemap = if self.ppu.lcdc.wnd_map() {
@@ -209,7 +240,7 @@ impl GbEmulator {
                         0x9800
                     };
 
-                    let x = fetcher.pos;
+                    let x = fetcher.bg_pos;
                     let y = 32 * (self.ppu.wlc as u16 / 8);
 
                     (x, y, tilemap)
@@ -220,7 +251,7 @@ impl GbEmulator {
                         0x9800
                     };
 
-                    let x = (self.ppu.scx / 8 + fetcher.pos) % 32;
+                    let x = (self.ppu.scx / 8 + fetcher.bg_pos) % 32;
                     let y_with_scroll = (self.ppu.ly as u16 + self.ppu.scy as u16) % 256; // y with scroll
                     let y = 32 * (y_with_scroll / 8);
                     (x, y, tilemap)
@@ -229,10 +260,10 @@ impl GbEmulator {
                 let offset = (y + x as u16) % 1024;
 
                 let tile_id = self.dispatch_read(tilemap | offset);
-                self.ppu.fetcher.state = DataLoWait { tile_id }
+                self.ppu.fetcher.bg_state = DataLoWait { tile_id }
             }
 
-            DataLoWait { tile_id } => fetcher.state = DataLo { tile_id },
+            DataLoWait { tile_id } => fetcher.bg_state = DataLo { tile_id },
             DataLo { tile_id } => {
                 let offset = if fetcher.wnd {
                     2 * (self.ppu.wlc as u16 % 8)
@@ -243,32 +274,32 @@ impl GbEmulator {
                 let tile_addr = tile_start | offset;
 
                 let tile_lo = self.dispatch_read(tile_addr);
-                self.ppu.fetcher.state = DataHiWait { tile_addr, tile_lo };
+                self.ppu.fetcher.bg_state = DataHiWait { tile_addr, tile_lo };
             }
 
-            DataHiWait { tile_addr, tile_lo } => fetcher.state = DataHi { tile_addr, tile_lo },
+            DataHiWait { tile_addr, tile_lo } => fetcher.bg_state = DataHi { tile_addr, tile_lo },
             DataHi { tile_addr, tile_lo } => {
                 let tile_hi = self.dispatch_read(tile_addr + 1);
 
                 if self.ppu.dot <= 86 {
                     // discard first fetched tile
-                    self.ppu.fetcher.state = TileWait;
+                    self.ppu.fetcher.bg_state = Init;
                 } else {
-                    self.ppu.fetcher.state = Push { tile_lo, tile_hi };
+                    self.ppu.fetcher.bg_state = Push { tile_lo, tile_hi };
                 }
             }
 
             Discard { count } => {
                 if count > 0 {
-                    fetcher.fifo.pop_front();
-                    fetcher.state = Discard { count: count - 1 };
+                    fetcher.bg_fifo.pop_front();
+                    fetcher.bg_state = Discard { count: count - 1 };
                 } else {
-                    fetcher.state = TileWait;
+                    fetcher.bg_state = Init;
                 }
             }
 
             Push { tile_lo, tile_hi } => {
-                if fetcher.fifo.len() <= 8 {
+                if fetcher.bg_fifo.len() <= 8 {
                     for i in (0..8).rev() {
                         let lo = (tile_lo >> i) & 1;
                         let hi = (tile_hi >> i) & 1;
@@ -278,19 +309,120 @@ impl GbEmulator {
                             .with_palette(self.ppu.bgp)
                             .build();
 
-                        fetcher.fifo.push_back(pixel);
+                        fetcher.bg_fifo.push_back(pixel);
                     }
 
                     if self.ppu.scx % 8 > 0 && self.ppu.dot <= 92 {
                         // discard scx % 8 pixels of first tile pushed
-                        fetcher.state = Discard {
+                        fetcher.bg_state = Discard {
                             count: self.ppu.scx % 8,
                         };
                     } else {
-                        fetcher.state = TileWait;
+                        fetcher.bg_state = Init;
                     }
 
-                    fetcher.pos += 1;
+                    fetcher.bg_pos += 1;
+                }
+            }
+        }
+    }
+
+    fn obj_fetcher_tick(&mut self) {
+        use FifoState::*;
+        let fetcher = &mut self.ppu.fetcher;
+
+        match fetcher.obj_state {
+            Init => fetcher.obj_state = Tile,
+            Tile => {
+                let (x, y, tilemap) = if fetcher.wnd {
+                    let tilemap = if self.ppu.lcdc.wnd_map() {
+                        0x9c00
+                    } else {
+                        0x9800
+                    };
+
+                    let x = fetcher.bg_pos;
+                    let y = 32 * (self.ppu.wlc as u16 / 8);
+
+                    (x, y, tilemap)
+                } else {
+                    let tilemap = if self.ppu.lcdc.bg_map() {
+                        0x9c00
+                    } else {
+                        0x9800
+                    };
+
+                    let x = (self.ppu.scx / 8 + fetcher.bg_pos) % 32;
+                    let y_with_scroll = (self.ppu.ly as u16 + self.ppu.scy as u16) % 256; // y with scroll
+                    let y = 32 * (y_with_scroll / 8);
+                    (x, y, tilemap)
+                };
+
+                let offset = (y + x as u16) % 1024;
+
+                let tile_id = self.dispatch_read(tilemap | offset);
+                self.ppu.fetcher.obj_state = DataLoWait { tile_id }
+            }
+
+            DataLoWait { tile_id } => fetcher.obj_state = DataLo { tile_id },
+            DataLo { tile_id } => {
+                let offset = if fetcher.wnd {
+                    2 * (self.ppu.wlc as u16 % 8)
+                } else {
+                    2 * ((self.ppu.ly as u16 + self.ppu.scy as u16) % 8)
+                };
+                let tile_start = self.ppu.tile_addr(tile_id);
+                let tile_addr = tile_start | offset;
+
+                let tile_lo = self.dispatch_read(tile_addr);
+                self.ppu.fetcher.obj_state = DataHiWait { tile_addr, tile_lo };
+            }
+
+            DataHiWait { tile_addr, tile_lo } => fetcher.obj_state = DataHi { tile_addr, tile_lo },
+            DataHi { tile_addr, tile_lo } => {
+                let tile_hi = self.dispatch_read(tile_addr + 1);
+
+                if self.ppu.dot <= 86 {
+                    // discard first fetched tile
+                    self.ppu.fetcher.obj_state = Init;
+                } else {
+                    self.ppu.fetcher.obj_state = Push { tile_lo, tile_hi };
+                }
+            }
+
+            Discard { count } => {
+                if count > 0 {
+                    fetcher.bg_fifo.pop_front();
+                    fetcher.obj_state = Discard { count: count - 1 };
+                } else {
+                    fetcher.obj_state = Init;
+                }
+            }
+
+            Push { tile_lo, tile_hi } => {
+                if fetcher.bg_fifo.len() <= 8 {
+                    for i in (0..8).rev() {
+                        let lo = (tile_lo >> i) & 1;
+                        let hi = (tile_hi >> i) & 1;
+                        let color = (hi << 1) | lo;
+                        let pixel = FifoPixelBuilder::new()
+                            .with_color(color)
+                            .with_palette(self.ppu.bgp)
+                            .build();
+
+                        fetcher.bg_fifo.push_back(pixel);
+                    }
+
+                    if self.ppu.scx % 8 > 0 && self.ppu.dot <= 92 {
+                        // discard scx % 8 pixels of first tile pushed
+                        fetcher.obj_state = Discard {
+                            count: self.ppu.scx % 8,
+                        };
+                    } else {
+                        fetcher.obj_state = Init;
+                    }
+
+                    fetcher.obj_pos += 1;
                 }
             }
         }
@@ -305,12 +437,12 @@ impl GbEmulator {
     }
 
     fn render_pixel(&mut self) {
-        if self.ppu.fetcher.fifo.len() <= 8 {
+        if self.ppu.fetcher.bg_fifo.len() <= 8 {
             return;
         }
 
         if self.ppu.lcdc.bg_wnd_priority() {
-            let pixel = self.ppu.fetcher.fifo.pop_front().unwrap();
+            let pixel = self.ppu.fetcher.bg_fifo.pop_front().unwrap();
             let color_id = (self.ppu.bgp >> (2 * pixel.color())) & 0x3;
             self.push_pixel(color_id);
         } else {
@@ -324,8 +456,9 @@ impl GbEmulator {
         let ppu = &mut self.ppu;
 
         ppu.stat.set_mode(Mode::OAMScan);
-        ppu.fetcher.reset();
+        ppu.fetcher.reset_obj();
         ppu.shifter_pos = 0;
+        ppu.objs_count = 0;
 
         if ppu.wy == ppu.ly {
             ppu.wy_eq_ly = true;
@@ -375,6 +508,8 @@ impl GbEmulator {
             Mode::OAMScan => {
                 if ppu.dot >= 80 {
                     ppu.stat.set_mode(Mode::Drawing);
+                } else {
+                    self.oam_scan_tick();
                 }
             }
 
@@ -386,14 +521,21 @@ impl GbEmulator {
                     && ppu.shifter_pos + 7 == ppu.wx
                 {
                     // we've reached the window
-                    ppu.fetcher.reset();
+                    ppu.fetcher.reset_obj();
                     // a 6-dot penalty is incurred while the BG fetcher is being set up for the window.
                     // ppu.fetcher.state = FifoState::Discard { count: 6 };
                     ppu.fetcher.wnd = true;
                 }
 
+                // if ppu.objs.iter().any(|s| s.x <= ppu.shifter_pos + 8) {
+                //     ppu.fetcher.bg_state = FifoState::Init;
+                //     ppu.shifter_paused = true;
+                // }
+
+                self.bg_fetcher_tick();
+                // self.obj_fetcher_tick();
                 self.render_pixel();
-                self.fetcher_tick();
+
                 if self.ppu.shifter_pos >= 160 {
                     self.enter_hblank();
                 }

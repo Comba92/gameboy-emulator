@@ -12,7 +12,10 @@ use sdl2::{
     pixels::PixelFormatEnum,
     render::ScaleMode,
 };
-use tomboyemu_core::emu::{self, GbEmulator};
+use tomboyemu_core::{
+    emu::{self, GbEmulator},
+    joypad,
+};
 const AXIS_DEAD_ZONE: i16 = 10_000;
 
 fn arc_mutex<T>(inner: T) -> Arc<Mutex<T>> {
@@ -78,7 +81,7 @@ fn main() {
                         bios_path = PathBuf::from(&filename);
                     } else {
                         let new_emu = GbEmulator::builder()
-                            .with_rom_file(&rom_path)
+                            .with_rom_file(&filename)
                             .with_bios_file(Some(&bios_path))
                             .build();
 
@@ -91,7 +94,6 @@ fn main() {
 
                                 *emu_lock = res;
                                 rom_path = path::PathBuf::from(filename);
-                                println!("{:?}", emu_lock.rom_info());
 
                                 // load_battery(&rom_path, &mut emu_lock);
                             }
@@ -99,114 +101,114 @@ fn main() {
                         }
                     }
                 }
-                // Event::KeyDown { keycode, .. } => {
-                //     if let Some(keycode) = keycode {
-                //         let mut emu_lock = emu.lock().unwrap();
-                //         match keycode {
-                //             Keycode::Up => emu_lock.set_button(InputBtn::Up, true),
-                //             Keycode::Left => emu_lock.set_button(InputBtn::Left, true),
-                //             Keycode::Down => emu_lock.set_button(InputBtn::Down, true),
-                //             Keycode::Right => emu_lock.set_button(InputBtn::Right, true),
-                //             Keycode::S => emu_lock.set_button(InputBtn::A, true),
-                //             Keycode::A => emu_lock.set_button(InputBtn::B, true),
-                //             Keycode::W => emu_lock.set_button(InputBtn::Start, true),
-                //             Keycode::E => emu_lock.set_button(InputBtn::Select, true),
-                //             #[cfg(feature = "savestates")]
-                //             Keycode::NUM_9 => emu_lock.savestate("./save.tmp").unwrap(),
-                //             #[cfg(feature = "savestates")]
-                //             Keycode::NUM_8 => {
-                //                 emu_lock.loadstate("./save.tmp").unwrap();
-                //             }
-                //             Keycode::R => {
-                //                 // save_battery(&rom_path, &emu_lock);
-                //                 // emu_lock.emu_reset();
-                //                 // load_battery(&rom_path, &mut emu_lock);
-                //             }
+                Event::KeyDown { keycode, .. } => {
+                    if let Some(keycode) = keycode {
+                        let mut emu_lock = emu.lock().unwrap();
+                        match keycode {
+                            Keycode::Up => emu_lock.set_button(joypad::Input::Up, true),
+                            Keycode::Left => emu_lock.set_button(joypad::Input::Left, true),
+                            Keycode::Down => emu_lock.set_button(joypad::Input::Down, true),
+                            Keycode::Right => emu_lock.set_button(joypad::Input::Right, true),
+                            Keycode::S => emu_lock.set_button(joypad::Input::A, true),
+                            Keycode::A => emu_lock.set_button(joypad::Input::B, true),
+                            Keycode::W => emu_lock.set_button(joypad::Input::Start, true),
+                            Keycode::E => emu_lock.set_button(joypad::Input::Select, true),
+                            #[cfg(feature = "savestates")]
+                            Keycode::NUM_9 => emu_lock.savestate("./save.tmp").unwrap(),
+                            #[cfg(feature = "savestates")]
+                            Keycode::NUM_8 => {
+                                emu_lock.loadstate("./save.tmp").unwrap();
+                            }
+                            Keycode::R => {
+                                // save_battery(&rom_path, &emu_lock);
+                                // emu_lock.emu_reset();
+                                // load_battery(&rom_path, &mut emu_lock);
+                            }
 
-                //             _ => {}
-                //         }
-                //     }
-                // }
+                            _ => {}
+                        }
+                    }
+                }
 
-                // Event::KeyUp { keycode, .. } => {
-                //     if let Some(keycode) = keycode {
-                //         let mut emu_lock = emu.lock().unwrap();
-                //         match keycode {
-                //             Keycode::Up => emu_lock.set_button(InputBtn::Up, false),
-                //             Keycode::Left => emu_lock.set_button(InputBtn::Left, false),
-                //             Keycode::Down => emu_lock.set_button(InputBtn::Down, false),
-                //             Keycode::Right => emu_lock.set_button(InputBtn::Right, false),
-                //             Keycode::S => emu_lock.set_button(InputBtn::A, false),
-                //             Keycode::A => emu_lock.set_button(InputBtn::B, false),
-                //             Keycode::W => emu_lock.set_button(InputBtn::Start, false),
-                //             Keycode::E => emu_lock.set_button(InputBtn::Select, false),
-                //             _ => {}
-                //         }
-                //     }
-                // }
+                Event::KeyUp { keycode, .. } => {
+                    if let Some(keycode) = keycode {
+                        let mut emu_lock = emu.lock().unwrap();
+                        match keycode {
+                            Keycode::Up => emu_lock.set_button(joypad::Input::Up, false),
+                            Keycode::Left => emu_lock.set_button(joypad::Input::Left, false),
+                            Keycode::Down => emu_lock.set_button(joypad::Input::Down, false),
+                            Keycode::Right => emu_lock.set_button(joypad::Input::Right, false),
+                            Keycode::S => emu_lock.set_button(joypad::Input::A, false),
+                            Keycode::A => emu_lock.set_button(joypad::Input::B, false),
+                            Keycode::W => emu_lock.set_button(joypad::Input::Start, false),
+                            Keycode::E => emu_lock.set_button(joypad::Input::Select, false),
+                            _ => {}
+                        }
+                    }
+                }
 
-                // Event::ControllerButtonDown { button, .. } => {
-                //     let mut emu_lock = emu.lock().unwrap();
-                //     match button {
-                //         Button::DPadUp => emu_lock.set_button(InputBtn::Up, true),
-                //         Button::DPadLeft => emu_lock.set_button(InputBtn::Left, true),
-                //         Button::DPadDown => emu_lock.set_button(InputBtn::Down, true),
-                //         Button::DPadRight => emu_lock.set_button(InputBtn::Right, true),
-                //         Button::A => emu_lock.set_button(InputBtn::A, true),
-                //         Button::X => emu_lock.set_button(InputBtn::B, true),
-                //         Button::Start => emu_lock.set_button(InputBtn::Start, true),
-                //         Button::Back => emu_lock.set_button(InputBtn::Select, true),
-                //         _ => {}
-                //     }
-                // }
+                Event::ControllerButtonDown { button, .. } => {
+                    let mut emu_lock = emu.lock().unwrap();
+                    match button {
+                        Button::DPadUp => emu_lock.set_button(joypad::Input::Up, true),
+                        Button::DPadLeft => emu_lock.set_button(joypad::Input::Left, true),
+                        Button::DPadDown => emu_lock.set_button(joypad::Input::Down, true),
+                        Button::DPadRight => emu_lock.set_button(joypad::Input::Right, true),
+                        Button::A => emu_lock.set_button(joypad::Input::A, true),
+                        Button::X => emu_lock.set_button(joypad::Input::B, true),
+                        Button::Start => emu_lock.set_button(joypad::Input::Start, true),
+                        Button::Back => emu_lock.set_button(joypad::Input::Select, true),
+                        _ => {}
+                    }
+                }
 
-                // Event::ControllerButtonUp { button, .. } => {
-                //     let mut emu_lock = emu.lock().unwrap();
-                //     match button {
-                //         Button::DPadUp => emu_lock.set_button(InputBtn::Up, false),
-                //         Button::DPadLeft => emu_lock.set_button(InputBtn::Left, false),
-                //         Button::DPadDown => emu_lock.set_button(InputBtn::Down, false),
-                //         Button::DPadRight => emu_lock.set_button(InputBtn::Right, false),
-                //         Button::A => emu_lock.set_button(InputBtn::A, false),
-                //         Button::X => emu_lock.set_button(InputBtn::B, false),
-                //         Button::Start => emu_lock.set_button(InputBtn::Start, false),
-                //         Button::Back => emu_lock.set_button(InputBtn::Select, false),
-                //         _ => {}
-                //     }
-                // }
+                Event::ControllerButtonUp { button, .. } => {
+                    let mut emu_lock = emu.lock().unwrap();
+                    match button {
+                        Button::DPadUp => emu_lock.set_button(joypad::Input::Up, false),
+                        Button::DPadLeft => emu_lock.set_button(joypad::Input::Left, false),
+                        Button::DPadDown => emu_lock.set_button(joypad::Input::Down, false),
+                        Button::DPadRight => emu_lock.set_button(joypad::Input::Right, false),
+                        Button::A => emu_lock.set_button(joypad::Input::A, false),
+                        Button::X => emu_lock.set_button(joypad::Input::B, false),
+                        Button::Start => emu_lock.set_button(joypad::Input::Start, false),
+                        Button::Back => emu_lock.set_button(joypad::Input::Select, false),
+                        _ => {}
+                    }
+                }
 
-                // Event::ControllerAxisMotion {
-                //     axis: Axis::LeftX,
-                //     value,
-                //     ..
-                // } => {
-                //     let mut emu_lock = emu.lock().unwrap();
+                Event::ControllerAxisMotion {
+                    axis: Axis::LeftX,
+                    value,
+                    ..
+                } => {
+                    let mut emu_lock = emu.lock().unwrap();
 
-                //     if value > AXIS_DEAD_ZONE {
-                //         emu_lock.set_button(InputBtn::Right, true);
-                //     } else if value < -AXIS_DEAD_ZONE {
-                //         emu_lock.set_button(InputBtn::Left, true);
-                //     } else {
-                //         emu_lock.set_button(InputBtn::Left, false);
-                //         emu_lock.set_button(InputBtn::Right, false);
-                //     }
-                // }
-                // Event::ControllerAxisMotion {
-                //     axis: Axis::LeftY,
-                //     value,
-                //     ..
-                // } => {
-                //     let mut emu_lock = emu.lock().unwrap();
+                    if value > AXIS_DEAD_ZONE {
+                        emu_lock.set_button(joypad::Input::Right, true);
+                    } else if value < -AXIS_DEAD_ZONE {
+                        emu_lock.set_button(joypad::Input::Left, true);
+                    } else {
+                        emu_lock.set_button(joypad::Input::Left, false);
+                        emu_lock.set_button(joypad::Input::Right, false);
+                    }
+                }
+                Event::ControllerAxisMotion {
+                    axis: Axis::LeftY,
+                    value,
+                    ..
+                } => {
+                    let mut emu_lock = emu.lock().unwrap();
 
-                //     if value > AXIS_DEAD_ZONE {
-                //         emu_lock.set_button(InputBtn::Down, true);
-                //     } else if value < -AXIS_DEAD_ZONE {
-                //         emu_lock.set_button(InputBtn::Up, true);
-                //     } else {
-                //         emu_lock.set_button(InputBtn::Up, false);
-                //         emu_lock.set_button(InputBtn::Down, false);
-                //     }
-                // }
+                    if value > AXIS_DEAD_ZONE {
+                        emu_lock.set_button(joypad::Input::Down, true);
+                    } else if value < -AXIS_DEAD_ZONE {
+                        emu_lock.set_button(joypad::Input::Up, true);
+                    } else {
+                        emu_lock.set_button(joypad::Input::Up, false);
+                        emu_lock.set_button(joypad::Input::Down, false);
+                    }
+                }
                 Event::ControllerDeviceAdded { which, .. } => match controller.open(which) {
                     Ok(controller) => {
                         println!("Found controller: {}\n", controller.name());

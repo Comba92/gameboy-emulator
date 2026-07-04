@@ -221,11 +221,11 @@ impl GbEmulator {
             0xff01 => self.serial.data = val,
             0xff02 => {
                 self.serial.ctrl = serial::Ctrl::from(val);
-                if self.serial.ctrl.transfer_enable() {
-                    self.serial.out_buffer.push(self.serial.data);
-                    let str = String::from_utf8_lossy(&self.serial.out_buffer);
-                    println!("{str}");
-                }
+                // if self.serial.ctrl.transfer_enable() {
+                //     self.serial.out_buffer.push(self.serial.data);
+                //     let str = String::from_utf8_lossy(&self.serial.out_buffer);
+                //     println!("{str}");
+                // }
             }
             0xff0f => self.bus.intf = IntFlags::from(val),
 
@@ -245,7 +245,6 @@ impl GbEmulator {
             0xff43 => self.ppu.scx = val,
             0xff45 => self.ppu.lyc = val,
             0xff46 => {
-                println!("DMA REQUEST");
                 self.dma.write(val);
             }
             0xff47 => self.ppu.bgp = val,

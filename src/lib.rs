@@ -60,11 +60,23 @@ mod dma {
     }
 }
 
-mod joypad {
+pub mod joypad {
     use bitfields::bitfield;
 
+    #[derive(Clone, Copy)]
+    pub enum Input {
+        Right = 0,
+        Left = 1,
+        Up = 2,
+        Down = 3,
+        A = 4,
+        B = 5,
+        Start = 6,
+        Select = 7,
+    }
+
     #[bitfield(u8)]
-    pub struct JoypadInput {
+    pub(crate) struct Pressed {
         right: bool,
         left: bool,
         up: bool,
@@ -75,32 +87,61 @@ mod joypad {
         start: bool,
     }
 
-    pub struct Joypad {
-        dpad_select: bool,
-        btns_select: bool,
-        pressed: JoypadInput,
+    pub(crate) struct Joypad {
+        pub dpad_select: bool,
+        pub btns_select: bool,
+        pub pressed: Pressed,
     }
     impl Joypad {
         pub fn new() -> Self {
             Self {
                 dpad_select: false,
                 btns_select: false,
-                pressed: JoypadInput::from(0xff),
+                pressed: Pressed::new(),
             }
         }
 
         pub fn read(&self) -> u8 {
-            (self.btns_select as u8) << 5 | (self.dpad_select as u8) << 4 | 0xf
+            // Note that, rather unconventionally for the Game Boy, a button being pressed is seen as the corresponding bit being 0, not 1.
+            let pressed = if self.btns_select {
+                !self.pressed.0 & 0xf
+            } else if self.dpad_select {
+                !self.pressed.0 >> 4
+            } else {
+                0xf
+            };
+
+            (!self.btns_select as u8) << 5 | (!self.dpad_select as u8) << 4 | pressed | 0xc0
         }
 
         pub fn write(&mut self, val: u8) {
-            self.dpad_select = val & 0x10 > 0;
-            self.btns_select = val & 0x20 > 0;
+            self.dpad_select = val & 0x10 == 0;
+            self.btns_select = val & 0x20 == 0;
         }
     }
 }
 
 impl GbEmulator {
+    pub fn set_button(&mut self, input: joypad::Input, state: bool) {
+        let was_down = self.joy.pressed.get_bit(input as u32);
+
+        if self.joy.btns_select && input as u8 <= 3 {
+            if !was_down && state {
+                self.bus.intf.set_joypad(true);
+            }
+        } else if self.joy.dpad_select && input as u8 >= 4 {
+            if !was_down && state {
+                self.bus.intf.set_joypad(true);
+            }
+        }
+
+        self.joy.pressed.set_bit(input as u32, state);
+    }
+
+    pub fn clear_buttons(&mut self) {
+        self.joy.pressed = joypad::Pressed::new();
+    }
+
     pub(crate) fn serial_step(&mut self) {
         let clock_target = self.clock_rate() as f32 / 8192.0;
         let serial = &mut self.serial;
