@@ -90,7 +90,7 @@ pub mod joypad {
     pub(crate) struct Joypad {
         pub dpad_select: bool,
         pub btns_select: bool,
-        pub pressed: Pressed,
+        pub pressed: Pressed, // pressed should be inverted when reading
     }
     impl Joypad {
         pub fn new() -> Self {
@@ -104,14 +104,14 @@ pub mod joypad {
         pub fn read(&self) -> u8 {
             // Note that, rather unconventionally for the Game Boy, a button being pressed is seen as the corresponding bit being 0, not 1.
             let pressed = if self.btns_select {
-                !self.pressed.0 & 0xf
+                (!self.pressed.0) >> 4
             } else if self.dpad_select {
-                !self.pressed.0 >> 4
+                (!self.pressed.0) & 0x0f
             } else {
-                0xf
+                0x0f
             };
 
-            (!self.btns_select as u8) << 5 | (!self.dpad_select as u8) << 4 | pressed | 0xc0
+            ((!self.btns_select) as u8) << 5 | ((!self.dpad_select) as u8) << 4 | pressed
         }
 
         pub fn write(&mut self, val: u8) {

@@ -230,7 +230,7 @@ impl GbEmulator {
             0xff0f => self.bus.intf = IntFlags::from(val),
 
             0xff40 => {
-                self.ppu.lcdc = ppu::Ctrl::from(val);
+                self.lcdc_write(val);
             }
 
             0xff41 => {
