@@ -37,20 +37,29 @@ pub struct CpuSm83 {
 }
 
 impl CpuSm83 {
-    pub fn new() -> Self {
-        Self {
+    pub fn new_bootless() -> Self {
+        let mut res = Self {
             a: 1,
-            f: FlagsBuilder::new().with_zero(true).with_neg(false).build(),
-            pc: 0x100,
+            f: Flags::from_bits(176),
+            pc: 0x101,
             sp: 0xfffe,
             ..Default::default()
-        }
+        };
+
+        res.bc.set_lo(0x13);
+        res.de.set_lo(0xd8);
+        res.hl.set_hi(0x01);
+        res.hl.set_lo(0x4d);
+
+        res
     }
 }
 
 impl GbEmulator {
     pub fn cpu_step(&mut self) {
         self.handle_interrupts();
+
+        // if last instruction was ei, we poll interrupts, and only then set ime
         if self.cpu.ei {
             self.cpu.ime = true;
             self.cpu.ei = false;
@@ -65,21 +74,18 @@ impl GbEmulator {
     }
 
     pub fn handle_interrupts(&mut self) {
-        if !self.cpu.ime {
-            return;
-        }
+        let ints = self.bus.inte.into_bits() & self.bus.intf.into_bits();
 
         if !self.cpu.ime {
             // If IME is not set, there are two distinct cases, depending on whether an interrupt is pending as the halt instruction is first executed.
             // If no interrupt is pending, halt executes as normal, and the CPU resumes regular execution as soon as an interrupt becomes pending. However, since IME=0, the interrupt is not handled.
-            if self.bus.inte.into_bits() & self.bus.intf.into_bits() & 0x1f > 0 {
+            if ints > 0 {
                 self.cpu.halted = false;
             }
 
             return;
         }
 
-        let ints = self.bus.inte.into_bits() & self.bus.intf.into_bits();
         let intr = ints.trailing_zeros();
 
         if intr < 5 {
@@ -99,6 +105,7 @@ impl GbEmulator {
     fn tick(&mut self) {
         self.cpu.mcycles += 1;
 
+        self.timer_step();
         self.serial_step();
         self.dma_step();
 
@@ -175,9 +182,6 @@ impl GbEmulator {
         self.tick();
         self.dispatch_read(addr)
     }
-    fn read16(&mut self, addr: u16) -> u16 {
-        u16::from_le_bytes([self.read8(addr), self.read8(addr.wrapping_add(1))])
-    }
 
     fn write8(&mut self, addr: u16, val: u8) {
         self.tick();
@@ -202,18 +206,23 @@ impl GbEmulator {
 
     // stack grows backwards
     fn stack_push(&mut self, val: u16) {
-        let sp = self.cpu.sp.wrapping_sub(2);
-        self.write16(sp, val);
-        self.cpu.sp = sp;
+        let [lo, hi] = val.to_le_bytes();
+        self.cpu.sp = self.cpu.sp.wrapping_sub(1);
+        self.write8(self.cpu.sp, hi);
+        self.cpu.sp = self.cpu.sp.wrapping_sub(1);
+        self.write8(self.cpu.sp, lo);
     }
+
     fn stack_pop(&mut self) -> u16 {
-        let value = self.read16(self.cpu.sp);
-        self.cpu.sp = self.cpu.sp.wrapping_add(2);
-        value
+        let lo = self.read8(self.cpu.sp);
+        self.cpu.sp = self.cpu.sp.wrapping_add(1);
+        let hi = self.read8(self.cpu.sp);
+        self.cpu.sp = self.cpu.sp.wrapping_add(1);
+        u16::from_le_bytes([lo, hi])
     }
 
     const fn hram(&self, offset: u8) -> u16 {
-        0xFF00 | offset as u16
+        0xff00 | offset as u16
     }
 
     fn immediate8(&mut self) -> u8 {
@@ -833,20 +842,22 @@ impl GbEmulator {
     }
 
     fn halt(&mut self) {
-        let inte = self.bus.inte.into_bits();
-        let intf = self.bus.intf.into_bits();
+        self.cpu.halted = true;
 
-        // If IME is not set, there are two distinct cases, depending on whether an interrupt is pending as the halt instruction is first executed.
-        if !self.cpu.ime && (inte & intf & 0x1f) > 0 {
-            // If an interrupt is pending, halt immediately exits, as expected, however the “halt bug” is triggered.
-            // https://gbdev.io/pandocs/halt.html#halt-bug
+        // let inte = self.bus.inte.into_bits();
+        // let intf = self.bus.intf.into_bits();
 
-            // read without increasing pc
-            let opcode = self.read8(self.cpu.pc);
-            self.decode_n_execute(opcode);
-        } else {
-            self.cpu.halted = true;
-        }
+        // // If IME is not set, there are two distinct cases, depending on whether an interrupt is pending as the halt instruction is first executed.
+        // if !self.cpu.ime && (inte & intf & 0x1f) > 0 {
+        //     // If an interrupt is pending, halt immediately exits, as expected, however the “halt bug” is triggered.
+        //     // https://gbdev.io/pandocs/halt.html#halt-bug
+
+        //     // read without increasing pc
+        //     let opcode = self.read8(self.cpu.pc);
+        //     self.decode_n_execute(opcode);
+        // } else {
+        //     self.cpu.halted = true;
+        // }
         // TODO
     }
 }

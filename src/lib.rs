@@ -1,3 +1,5 @@
+use sdl2::libc::clock;
+
 use crate::emu::GbEmulator;
 
 mod bus;
@@ -7,8 +9,48 @@ mod ppu;
 mod rom;
 
 mod timer {
-    pub struct Timer {
+    use bitfields::{bitfield, bitflag};
 
+    #[bitflag(u8)]
+    pub enum Mode {
+        #[base]
+        M256 = 0,
+        M4 = 1,
+        M16 = 2,
+        M64 = 3,
+    }
+
+    #[bitfield(u8)]
+    pub struct Ctrl {
+        #[bits(2)]
+        clock_select: Mode,
+        tac_enable: bool,
+
+        #[bits(5)]
+        _unused: u8,
+    }
+
+    pub struct Timer {
+        pub div: u8,
+        pub tima: u8,
+        pub tma: u8,
+        pub tac: Ctrl,
+
+        pub div_counter: u32,
+        pub tima_counter: u32,
+    }
+
+    impl Timer {
+        pub fn new() -> Self {
+            Self {
+                div: 0,
+                tima: 0,
+                tma: 0,
+                tac: Ctrl::from_bits(0),
+                div_counter: 0,
+                tima_counter: 0,
+            }
+        }
     }
 }
 
@@ -146,6 +188,40 @@ impl GbEmulator {
 
     pub fn clear_buttons(&mut self) {
         self.joy.pressed = joypad::Pressed::new();
+    }
+
+    pub(crate) fn timer_step(&mut self) {
+        let div_clock_target = self.clock_rate() as u32 / 16384;
+        let timer = &mut self.timer;
+
+        timer.div_counter += 1;
+        if timer.div_counter >= div_clock_target {
+            timer.div_counter -= div_clock_target;
+            timer.div = timer.div.wrapping_add(1);
+        }
+
+        let tima_inc = match timer.tac.clock_select() {
+            timer::Mode::M256 => 4096,
+            timer::Mode::M4 => 262144,
+            timer::Mode::M16 => 65536,
+            timer::Mode::M64 => 16384,
+        };
+
+        let tima_clock_target = self.clock_rate() as u32 / tima_inc;
+        let timer = &mut self.timer;
+
+        timer.tima_counter += 1;
+        if timer.tima_counter >= tima_clock_target {
+            timer.tima_counter -= tima_clock_target;
+
+            let (tima, ovfl) = timer.tima.overflowing_add(1);
+            self.timer.tima = if ovfl {
+                self.bus.intf.set_timer(true);
+                self.timer.tma
+            } else {
+                tima
+            };
+        }
     }
 
     pub(crate) fn serial_step(&mut self) {

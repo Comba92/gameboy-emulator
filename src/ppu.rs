@@ -157,7 +157,7 @@ pub struct Ppu {
     obj_buf: Vec<Object>,
     obj_pos_x: HashMap<i16, u8>,
     obj_fetch: ObjFetcherState,
-    obj_fifo: VecDeque<FifoPixel>,
+    obj_fifo: VecDeque<FifoPixel>, // TODO: this should always have 8 transparent pixels ready!!
 }
 
 impl Ppu {
@@ -307,7 +307,7 @@ impl GbEmulator {
             && ppu.lcdc.bg_wnd_priority()
             && ppu.lcdc.wnd_enable()
             && ppu.wy_eq_ly
-            && ppu.fetch_fine_x + 7 == ppu.wx as i16
+            && ppu.fetch_fine_x == ppu.wx as i16 - 7
         {
             // we've reached the window
             // a 6-dot penalty is incurred while the BG fetcher is being set up for the window.
@@ -447,7 +447,10 @@ impl GbEmulator {
             let bg_pixel = ppu.bg_fifo.pop_front().unwrap();
             let obj_pixel = ppu.obj_fifo.pop_front().unwrap_or(0.into());
 
-            if ppu.lcdc.obj_enable() && obj_pixel.color() > 0 && (!obj_pixel.priority() || bg_pixel.color() == 0) {
+            if ppu.lcdc.obj_enable()
+                && obj_pixel.color() > 0
+                && (!obj_pixel.priority() || bg_pixel.color() == 0)
+            {
                 let pal = if obj_pixel.dmg_palette() {
                     ppu.obp1
                 } else {
@@ -499,7 +502,11 @@ impl GbEmulator {
         // we wait for the first 6 steps, then fetch and push on the 7th;
         ppu.bg_fetch = BgFetcherState::start(ppu.scx, ppu.scy);
         ppu.bg_fifo.clear();
-        ppu.fetch_scrolled = if (ppu.scx % 8) > 0 { Some(ppu.scx % 8) } else { None };
+        ppu.fetch_scrolled = if (ppu.scx % 8) > 0 {
+            Some(ppu.scx % 8)
+        } else {
+            None
+        };
         ppu.wnd_rendering = false;
 
         ppu.obj_fetch = ObjFetcherState::Idle;

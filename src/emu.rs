@@ -6,6 +6,7 @@ use crate::{
     ppu::{DMG_PALETTE, Ppu},
     rom::{Cart, RomData, is_valid_bios},
     serial::Serial,
+    timer::Timer,
 };
 use std::{io, path::Path};
 
@@ -28,6 +29,7 @@ pub struct GbEmulator {
     pub(crate) mbc: Mbc,
     pub(crate) dma: Dma,
     pub(crate) serial: Serial,
+    pub(crate) timer: Timer,
     pub(crate) joy: Joypad,
 
     pub(crate) output: GbOutput,
@@ -36,10 +38,11 @@ pub struct GbEmulator {
 impl GbEmulator {
     pub fn debug() -> Self {
         Self {
-            cpu: CpuSm83::new(),
+            cpu: CpuSm83::default(),
             bus: Bus::with_ram_64kb(),
             ppu: Ppu::new(),
             mbc: Mbc::None,
+            timer: Timer::new(),
             serial: Serial::new(),
             dma: Dma::new(),
             joy: Joypad::new(),
@@ -58,15 +61,20 @@ impl GbEmulator {
             }
         }
 
+        let cpu = if bios.is_some() {
+            CpuSm83::default()
+        } else {
+            CpuSm83::new_bootless()
+        };
+
         let mapper = game.header.mapper;
         Ok(Self {
             mbc: Mbc::new(mapper)?,
 
-            cpu: CpuSm83::new(),
+            cpu,
             ppu: Ppu::new(),
-            // TODO: always set bios to zero for now
-            // consider passing an option here too
-            bus: Bus::new(game, bios.unwrap_or_else(|| vec![0; 0x100])),
+            bus: Bus::new(game, bios),
+            timer: Timer::new(),
             serial: Serial::new(),
             dma: Dma::new(),
             joy: Joypad::new(),
@@ -82,11 +90,11 @@ impl GbEmulator {
         GbBuilder::default()
     }
 
-    pub fn rom_info(&self) -> &RomData {
+    pub const fn rom_info(&self) -> &RomData {
         &self.bus.header
     }
 
-    pub fn clock_rate(&self) -> usize {
+    pub const fn clock_rate(&self) -> usize {
         DMG_CLOCK_RATE
     }
 
@@ -246,7 +254,7 @@ enum RomSource<'a> {
 pub struct GbBuilder<'a> {
     rom: Option<RomSource<'a>>,
     bios: Option<RomSource<'a>>,
-    boot_bios_only: bool,
+    skip_bios: bool,
 }
 
 impl<'a> GbBuilder<'a> {
@@ -270,8 +278,8 @@ impl<'a> GbBuilder<'a> {
         self
     }
 
-    pub fn boot_bios_only(mut self, cond: bool) -> Self {
-        self.boot_bios_only = cond;
+    pub fn skip_boot(mut self, cond: bool) -> Self {
+        self.skip_bios = cond;
         self
     }
 
@@ -304,7 +312,7 @@ impl<'a> GbBuilder<'a> {
         };
 
         match self.bios {
-            Some(bios_src) => {
+            Some(bios_src) if !self.skip_bios => {
                 let bios = match bios_src {
                     RomSource::Bytes(bytes) => read_zip_file_from_bytes(bytes)
                         .map_or_else(|_| bytes.to_owned(), |unzipped| unzipped),
@@ -312,20 +320,10 @@ impl<'a> GbBuilder<'a> {
                         .map_err(|e| format!("error reading BIOS: {e}"))?,
                 };
 
-                if self.boot_bios_only {
-                    GbEmulator::new(Cart::default(), Some(bios))
-                } else {
-                    GbEmulator::new(game, Some(bios))
-                }
+                GbEmulator::new(game, Some(bios))
             }
 
-            None => {
-                if self.boot_bios_only {
-                    Err("no BIOS provided when asked for BIOS only boot".into())
-                } else {
-                    GbEmulator::new(game, None)
-                }
-            }
+            _ => GbEmulator::new(game, None),
         }
     }
 }

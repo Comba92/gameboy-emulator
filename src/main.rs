@@ -51,7 +51,7 @@ fn main() {
 
     println!("Current dir: {:?}", std::env::current_dir());
 
-    let mut bios_path = PathBuf::from("utils/dmg_boot.bin");
+    let mut bios_path = PathBuf::from("utils/bootix_dmg.bin");
     let mut rom_path = PathBuf::from("../roms/dmg-acid2.gb");
 
     // let emu = GbEmulator::load_bios_only(Some(bios)).unwrap();
@@ -59,10 +59,11 @@ fn main() {
     let emu = GbEmulator::builder()
         .with_rom_file(&rom_path)
         .with_bios_file(Some(&bios_path))
+        .skip_boot(true)
         .build()
         .unwrap();
 
-    let frame_rate = time::Duration::from_secs_f32(1.0 / emu::FRAME_RATE);
+    let frame_rate = time::Duration::from_secs_f32(1.0 / 60.0);
     let emu = arc_mutex(emu);
 
     'running: loop {
@@ -83,6 +84,7 @@ fn main() {
                         let new_emu = GbEmulator::builder()
                             .with_rom_file(&filename)
                             .with_bios_file(Some(&bios_path))
+                            // .skip_boot(true)
                             .build();
 
                         match new_emu {

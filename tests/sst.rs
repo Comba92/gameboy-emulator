@@ -5,7 +5,7 @@ struct CpuTest<'a> {
     start: CpuTestState,
     #[serde(rename = "final")]
     end: CpuTestState,
-    cycles: Vec<(usize, Option<usize>, &'a str)>,
+    cycles: Vec<(u16, Option<u8>, &'a str)>,
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -80,6 +80,8 @@ fn cpu_from_mock(emu: &mut GbEmulator, mock: &CpuTestState) {
     for (addr, val) in &mock.ram {
         emu.dispatch_write(*addr, *val);
     }
+
+    emu.debug.clear();
 }
 
 #[test]
@@ -100,33 +102,57 @@ fn cpu_test(emu: &mut GbEmulator, test: &CpuTest) -> bool {
     assert_eq!(res, test.end, "{}", test.name);
     let eq = res == test.end;
 
+    let mut my_cycle_count = 0;
+    for i in 0..test.cycles.len() {
+        let log_cycle = &test.cycles[i];
+        let my_cycle = &emu.debug[my_cycle_count];
+
+        match log_cycle.2 {
+            "r-m" => {
+                assert_eq!(
+                    false, my_cycle.2,
+                    "{} - Expected a read, got a write",
+                    test.name
+                );
+                assert_eq!(
+                    log_cycle.0, my_cycle.0,
+                    "{} {:?} - Reading from wrong address",
+                    test.name, emu.debug
+                );
+                my_cycle_count += 1;
+            }
+            "-wm" => {
+                assert_eq!(
+                    true, my_cycle.2,
+                    "{} - Expected a write, got a read",
+                    test.name
+                );
+                assert_eq!(
+                    log_cycle.0, my_cycle.0,
+                    "{} {:?} - Writing to wrong address",
+                    test.name, emu.debug
+                );
+                assert_eq!(
+                    log_cycle.1.unwrap_or_default(),
+                    my_cycle.1,
+                    "{} {:?} - Writing wrong value",
+                    test.name,
+                    emu.debug
+                );
+                my_cycle_count += 1;
+            }
+            _ => {}
+        }
+    }
+
     // clear ram written
     for (addr, _) in &test.end.ram {
         emu.dispatch_write(*addr, 0);
     }
 
     emu.cpu = CpuSm83::default();
+    emu.debug.clear();
     eq
-}
-
-#[test]
-fn exec_one_test() {
-    let test: Vec<CpuTest> = serde_json::from_str(include_str!("./sm83/v1/a9.json")).unwrap();
-
-    let mut emu = emu::GbEmulator::debug();
-    println!("{:?}", emu.cpu);
-
-    cpu_from_mock(&mut emu, &test[0].start);
-
-    println!("{:?}", test[0]);
-
-    while emu.cpu.mcycles < test[0].cycles.len() {
-        emu.cpu_step();
-    }
-
-    let res = cpu_to_mock(&mut emu, &test[0].end);
-
-    assert_eq!(res, test[0].end);
 }
 
 #[test]
@@ -157,4 +183,24 @@ fn exec_all_tests() {
 
         file_str.clear();
     }
+}
+
+#[test]
+fn exec_one_test() {
+    let test: Vec<CpuTest> = serde_json::from_str(include_str!("./sm83/v1/a9.json")).unwrap();
+
+    let mut emu = emu::GbEmulator::debug();
+    println!("{:?}", emu.cpu);
+
+    cpu_from_mock(&mut emu, &test[0].start);
+
+    println!("{:?}", test[0]);
+
+    while emu.cpu.mcycles < test[0].cycles.len() {
+        emu.cpu_step();
+    }
+
+    let res = cpu_to_mock(&mut emu, &test[0].end);
+
+    assert_eq!(res, test[0].end);
 }

@@ -1,8 +1,7 @@
 use crate::{
     emu::GbEmulator,
-    ppu,
     rom::{Cart, RomData},
-    serial,
+    serial, timer,
 };
 use bitfields::bitfield;
 
@@ -13,14 +12,6 @@ enum Handler {
     Wram, // Work RAM
     IO,
     Debug,
-}
-
-enum IOHandler {
-    EchoRam,
-    OAM,
-    Unused,
-    HRam,
-    IE,
 }
 
 const DEFAULT_MAP: [Handler; 16] = [
@@ -90,11 +81,10 @@ impl Bus {
         }
     }
 
-    pub fn new(mut cart: Cart, bios: Vec<u8>) -> Self {
+    pub fn new(mut cart: Cart, bios: Option<Vec<u8>>) -> Self {
         let mut res = Self {
             rom: std::mem::take(&mut cart.rom).into_boxed_slice(),
             bios: None,
-            header: cart.header,
 
             intf: IntFlags::new(),
             inte: IntFlags::new(),
@@ -105,16 +95,25 @@ impl Bus {
             sram: Default::default(),
             wram: vec![0; 8 * 1024].into_boxed_slice(),
 
+            header: cart.header,
             map: DEFAULT_MAP,
         };
 
         println!("{:?}", res.header);
 
-        // at boot bios is mapped to the first 0x100 bytes
-        // swap bios out with the first 0x100, set them back later
-        // let tmp = res.rom[..0x0100].to_vec();
-        // res.rom[..0x0100].copy_from_slice(&bios);
-        // res.bios = Some(tmp.into_boxed_slice());
+        if res.header.ram_size > 0 {
+            res.sram = vec![0; res.header.ram_size as usize].into_boxed_slice();
+            res.map[0xa] = Handler::Sram;
+            res.map[0xb] = Handler::Sram;
+        }
+
+        if let Some(bios) = bios {
+            // at boot bios is mapped to the first 0x100 bytes
+            // swap bios out with the first 0x100, set them back later
+            let tmp = res.rom[..0x0100].to_vec();
+            res.rom[..0x0100].copy_from_slice(&bios);
+            res.bios = Some(tmp.into_boxed_slice());
+        }
 
         res
     }
@@ -139,7 +138,7 @@ impl GbEmulator {
         let bus = &mut self.bus;
 
         let handler = addr >> 12;
-        match bus.map[handler as usize] {
+        let res = match bus.map[handler as usize] {
             Handler::Rom => bus.rom[addr as usize],
             Handler::Vram => {
                 // if self.ppu.stat.mode() != ppu::Mode::Drawing {
@@ -152,7 +151,9 @@ impl GbEmulator {
             Handler::Wram => bus.wram[addr as usize - 0xc000],
             Handler::IO => self.io_read(addr),
             Handler::Debug => bus.wram[addr as usize],
-        }
+        };
+
+        res
     }
 
     pub fn dispatch_write(&mut self, addr: u16, val: u8) {
@@ -180,7 +181,8 @@ impl GbEmulator {
         } else if addr <= 0xfe9f {
             // OAM
             return self.bus.oam[addr as usize - 0xfe00];
-        } else if addr >= 0xff80 && addr <= 0xffee {
+        } else if 0xff80 <= addr && addr <= 0xfffe {
+            // HRAM
             return self.bus.hram[addr as usize - 0xff80];
         }
 
@@ -188,6 +190,10 @@ impl GbEmulator {
             0xff00 => self.joy.read(),
             0xff01 => self.serial.data,
             0xff02 => self.serial.ctrl.into_bits(),
+            0xff04 => self.timer.div,
+            0xff05 => self.timer.tima,
+            0xff06 => self.timer.tma,
+            0xff07 => self.timer.tac.into_bits(),
 
             0xff0f => self.bus.intf.into_bits(),
             0xff40 => self.ppu.lcdc.into_bits(),
@@ -195,6 +201,7 @@ impl GbEmulator {
             0xff42 => self.ppu.scy,
             0xff43 => self.ppu.scx,
             0xff44 => self.ppu.ly,
+            // 0xff44 => 144,
             0xff45 => self.ppu.lyc,
 
             0xff47 => self.ppu.bgp,
@@ -212,7 +219,8 @@ impl GbEmulator {
         if addr >= 0xfe00 && addr <= 0xfe9f {
             // OAM
             self.bus.oam[addr as usize - 0xfe00] = val;
-        } else if addr >= 0xff80 && addr <= 0xffee {
+        } else if 0xff80 <= addr && addr <= 0xfffe {
+            // HRAM
             self.bus.hram[addr as usize - 0xff80] = val;
         }
 
@@ -227,7 +235,14 @@ impl GbEmulator {
                 //     println!("{str}");
                 // }
             }
-            0xff0f => self.bus.intf = IntFlags::from(val),
+            0xff04 => self.timer.div = 0,
+            0xff05 => self.timer.tima = val,
+            0xff06 => self.timer.tma = val,
+            0xff07 => self.timer.tac = timer::Ctrl::from_bits(val),
+
+            0xff0f => {
+                self.bus.intf = IntFlags::from(val);
+            }
 
             0xff40 => {
                 self.lcdc_write(val);
@@ -253,13 +268,14 @@ impl GbEmulator {
             0xff4a => self.ppu.wy = val,
             0xff4b => self.ppu.wx = val,
             0xff50 => {
-                println!("BIOS UNMAPPED");
                 if let Some(boot) = self.bus.bios.take() {
                     self.bus.rom[..0x100].copy_from_slice(&boot);
                 }
             }
 
-            0xffff => self.bus.inte = IntFlags::from(val),
+            0xffff => {
+                self.bus.inte = IntFlags::from(val);
+            }
 
             _ => {}
         }

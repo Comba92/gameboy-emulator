@@ -27,7 +27,7 @@ impl Cart {
 }
 
 #[derive(Default, Debug, Clone, PartialEq)]
-enum ConsoleMode {
+pub enum ConsoleMode {
     #[default]
     DMG,
     Compat,
@@ -35,7 +35,7 @@ enum ConsoleMode {
 }
 
 #[derive(Default, Debug, Clone)]
-enum Region {
+pub enum Region {
     #[default]
     World,
     Oversea,
@@ -50,6 +50,7 @@ pub struct RomData {
     pub mapper: u8,
     pub rom_size: usize,
     pub ram_size: usize,
+    pub battery: bool,
     pub region: Region,
 }
 impl RomData {
@@ -103,6 +104,11 @@ impl RomData {
             0x1 => Region::Oversea,
             _ => Region::World,
         };
+
+        header.battery = [
+            0x03, 0x06, 0x09, 0x0d, 0x0f, 0x10, 0x13, 0x1b, 0x1d, 0x1e, 0x22, 0xff,
+        ]
+        .contains(&header.mapper);
 
         header.revision = bytes[0x14c];
 
