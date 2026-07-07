@@ -41,6 +41,7 @@ pub struct Stat {
     mode2_int: bool,
     lyc_int: bool,
 
+    #[bits(1, default = true)]
     _unused: bool,
 }
 

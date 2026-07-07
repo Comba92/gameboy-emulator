@@ -5,28 +5,43 @@ use crate::{
 };
 use bitfields::bitfield;
 
+pub const ROM0_START: u16 = 0x0000;
+pub const ROM1_START: u16 = 0x4000;
+pub const VRAM_START: u16 = 0x8000;
+pub const SRAM_START: u16 = 0xa000;
+pub const WRAM0_START: u16 = 0xc000;
+pub const WRAM1_START: u16 = 0xd000;
+
+pub const ROM_BANK_SIZE: u16 = 16 * 1024;
+pub const VRAM_BANK_SIZE: u16 = 8 * 1024;
+pub const SRAM_BANK_SIZE: u16 = 8 * 1024;
+pub const WRAM_BANK_SIZE: u16 = 4 * 1024;
+
+#[derive(Clone)]
 enum Handler {
-    Rom,
+    Rom0,
+    Rom1,
     Vram, // Video RAM
     Sram, // Cartridge RAM
     Wram, // Work RAM
     IO,
+    OpenBus,
     Debug,
 }
 
 const DEFAULT_MAP: [Handler; 16] = [
-    Handler::Rom,
-    Handler::Rom,
-    Handler::Rom,
-    Handler::Rom,
-    Handler::Rom,
-    Handler::Rom,
-    Handler::Rom,
-    Handler::Rom,
+    Handler::Rom0,
+    Handler::Rom0,
+    Handler::Rom0,
+    Handler::Rom0,
+    Handler::Rom1,
+    Handler::Rom1,
+    Handler::Rom1,
+    Handler::Rom1,
     Handler::Vram,
     Handler::Vram,
-    Handler::Sram,
-    Handler::Sram,
+    Handler::OpenBus,
+    Handler::OpenBus,
     Handler::Wram,
     Handler::Wram,
     Handler::IO,
@@ -40,7 +55,7 @@ pub(crate) struct IntFlags {
     timer: bool,
     serial: bool,
     joypad: bool,
-    #[bits(3)]
+    #[bits(3, default = 0x7)]
     _unused: u8,
 }
 
@@ -57,6 +72,10 @@ pub(crate) struct Bus {
     pub(crate) vram: Box<[u8]>,
     pub(crate) sram: Box<[u8]>,
     pub(crate) wram: Box<[u8]>,
+
+    rom0_banking: Banker,
+    rom1_banking: Banker,
+    sram_banking: Banker,
 
     map: [Handler; 16],
 }
@@ -77,6 +96,10 @@ impl Bus {
             sram: Default::default(),
             wram: vec![0; 64 * 1024].into_boxed_slice(),
 
+            rom0_banking: Banker::new(ROM_BANK_SIZE, 0),
+            rom1_banking: Banker::new(ROM_BANK_SIZE, 0),
+            sram_banking: Banker::new(SRAM_BANK_SIZE, 0),
+
             map: std::array::from_fn(|_| Handler::Debug),
         }
     }
@@ -89,22 +112,36 @@ impl Bus {
             intf: IntFlags::new(),
             inte: IntFlags::new(),
 
-            hram: [0; _],
-            oam: [0; _],
-            vram: vec![0; 8 * 1024].into_boxed_slice(),
+            hram: [0xff; _],
+            oam: [0xff; _],
+            vram: vec![0xff; 8 * 1024].into_boxed_slice(),
             sram: Default::default(),
-            wram: vec![0; 8 * 1024].into_boxed_slice(),
+            wram: vec![0xff; 8 * 1024].into_boxed_slice(),
+
+            rom0_banking: Banker::new(ROM_BANK_SIZE, cart.header.rom_size),
+            rom1_banking: Banker::new(ROM_BANK_SIZE, cart.header.rom_size),
+            sram_banking: Banker::new(SRAM_BANK_SIZE, cart.header.ram_size),
 
             header: cart.header,
             map: DEFAULT_MAP,
         };
 
-        println!("{:?}", res.header);
+        res.rom0_banking.map(0);
+        res.rom1_banking.map(1);
 
         if res.header.ram_size > 0 {
-            res.sram = vec![0; res.header.ram_size as usize].into_boxed_slice();
-            res.map[0xa] = Handler::Sram;
-            res.map[0xb] = Handler::Sram;
+            res.sram = vec![0xff; res.header.ram_size as usize].into_boxed_slice();
+        }
+
+        // TODO: hardcoded for now
+        if [0x1, 0x2, 0x3].contains(&res.header.mapper) {
+            res.rom0_banking = Banker::new(ROM_BANK_SIZE, res.header.rom_size);
+            res.rom1_banking = Banker::new(ROM_BANK_SIZE, res.header.rom_size);
+            res.sram_banking = Banker::new(SRAM_BANK_SIZE, res.header.ram_size);
+
+            res.rom0_banking.map(0); // default to bank 0
+            res.rom1_banking.map(1); // default to bank 1
+            res.sram_banking.map(0);
         }
 
         if let Some(bios) = bios {
@@ -125,9 +162,11 @@ impl GbEmulator {
 
         let handler = addr >> 12;
         match bus.map[handler as usize] {
-            Handler::Rom => bus.rom[addr as usize],
+            Handler::Rom0 => bus.rom[bus.rom0_banking.translate(addr)],
+            Handler::Rom1 => bus.rom[bus.rom1_banking.translate(addr)],
+            Handler::OpenBus => 0xff,
             Handler::Vram => bus.vram[addr as usize - 0x8000],
-            Handler::Sram => 0,
+            Handler::Sram => bus.sram[bus.sram_banking.translate(addr)],
             Handler::Wram => bus.wram[addr as usize - 0xa000],
             Handler::IO => 0xff,
             Handler::Debug => bus.wram[addr as usize],
@@ -139,7 +178,10 @@ impl GbEmulator {
 
         let handler = addr >> 12;
         let res = match bus.map[handler as usize] {
-            Handler::Rom => bus.rom[addr as usize],
+            Handler::Rom0 => bus.rom[bus.rom0_banking.translate(addr)],
+            Handler::Rom1 => bus.rom[bus.rom1_banking.translate(addr)],
+            Handler::OpenBus => 0xff,
+
             Handler::Vram => {
                 // if self.ppu.stat.mode() != ppu::Mode::Drawing {
                 bus.vram[addr as usize - 0x8000]
@@ -147,7 +189,7 @@ impl GbEmulator {
                 // 0xff
                 // }
             }
-            Handler::Sram => 0,
+            Handler::Sram => bus.sram[bus.sram_banking.translate(addr)],
             Handler::Wram => bus.wram[addr as usize - 0xc000],
             Handler::IO => self.io_read(addr),
             Handler::Debug => bus.wram[addr as usize],
@@ -161,13 +203,15 @@ impl GbEmulator {
 
         let handler = addr >> 12;
         match bus.map[handler as usize] {
-            Handler::Rom => self.prg_write(addr, val),
+            Handler::Rom0 | Handler::Rom1 => self.prg_write(addr, val),
+            Handler::OpenBus => {}
+
             Handler::Vram => {
                 // if self.ppu.stat.mode() != ppu::Mode::Drawing {
                 bus.vram[addr as usize - 0x8000] = val
                 // }
             }
-            Handler::Sram => {}
+            Handler::Sram => bus.sram[bus.sram_banking.translate(addr)] = val,
             Handler::Wram => bus.wram[addr as usize - 0xc000] = val,
             Handler::IO => self.io_write(addr, val),
             Handler::Debug => bus.wram[addr as usize] = val,
@@ -203,7 +247,7 @@ impl GbEmulator {
             0xff44 => self.ppu.ly,
             // 0xff44 => 144,
             0xff45 => self.ppu.lyc,
-
+            0xff46 => self.dma.read(),
             0xff47 => self.ppu.bgp,
             0xff48 => self.ppu.obp0,
             0xff49 => self.ppu.obp1,
@@ -259,9 +303,7 @@ impl GbEmulator {
             0xff42 => self.ppu.scy = val,
             0xff43 => self.ppu.scx = val,
             0xff45 => self.ppu.lyc = val,
-            0xff46 => {
-                self.dma.write(val);
-            }
+            0xff46 => self.dma.write(val),
             0xff47 => self.ppu.bgp = val,
             0xff48 => self.ppu.obp0 = val,
             0xff49 => self.ppu.obp1 = val,
@@ -287,13 +329,75 @@ impl GbEmulator {
             Mbc::MBC1(m) => {
                 if addr <= 0x1fff {
                     m.ram_enable = val & 0xf == 0xa;
+                    if m.ram_enable {
+                        self.bus.map[0xa] = Handler::Sram;
+                        self.bus.map[0xb] = Handler::Sram;
+                    } else {
+                        self.bus.map[0xa] = Handler::OpenBus;
+                        self.bus.map[0xb] = Handler::OpenBus;
+                    }
                 } else if addr <= 0x3fff {
+                    m.rom_bank = (val & 0x1f).max(1);
                 } else if addr <= 0x5fff {
+                    m.ram_bank = val & 0x3;
                 } else {
                     m.mode = val & 1 != 0;
                 }
+
+                m.update(&mut self.bus);
             }
         }
+    }
+}
+
+#[derive(Debug)]
+struct Banker {
+    banks_count_mask: u16,
+    bank_size_mask: u16,
+    bank_size_shift: u8,
+    real_addr_start: u32,
+}
+
+impl Banker {
+    pub fn new(virt_size: u16, real_size: usize) -> Self {
+        // https://stackoverflow.com/questions/25787613/division-and-multiplication-by-power-of-2
+        let bank_size_shift = virt_size.ilog2() as u8;
+        // TODO: this doesn't work if bankSize is odd!
+        let bank_size_mask = virt_size.saturating_sub(1);
+
+        // TODO: if realSize < virtSize and there banks arent big enough, this becomes 0!!
+        // TODO: handle unconvetional realSizes (less tha 8KiB)
+        let banks_count = (real_size / virt_size as usize) as u16;
+        // TODO: this doesn't work if banksCount is odd! (shouldnt happen as it
+        // depends on realSize, and it should always be power of two)
+        let banks_count_mask = banks_count.saturating_sub(1);
+
+        let res = Self {
+            banks_count_mask,
+            bank_size_mask,
+            bank_size_shift,
+            real_addr_start: 0,
+        };
+
+        res
+    }
+
+    pub fn map(&mut self, bank: u8) {
+        // some games might write bigger bank numbers than really avaible
+        // let bank = bank % self.banks_count;
+        // let bank = bank & (self.banks_count-1);
+        let bank = bank as u16 & self.banks_count_mask;
+
+        // we precompute the real index instead of keeping the bank number
+        // self.real_addr_start = bank * self.bank_size;
+        self.real_addr_start = (bank as u32) << self.bank_size_shift;
+    }
+
+    pub fn translate(&self, addr: u16) -> usize {
+        // i do not expect to write outside the slots array here either.
+        // self.real_addr_start + (addr % self.bank_size)
+        // real index + offset
+        self.real_addr_start as usize | (addr & self.bank_size_mask) as usize
     }
 }
 
@@ -303,10 +407,10 @@ pub enum Mbc {
 }
 
 impl Mbc {
-    pub fn new(id: u8) -> Result<Self, &'static str> {
-        let res = match id {
+    pub fn new(header: &RomData) -> Result<Self, &'static str> {
+        let res = match header.mapper {
             0x00 | 0x08 | 0x09 => Mbc::None,
-            0x01 | 0x02 | 0x03 => Mbc::MBC1(Mbc1::default()),
+            0x01 | 0x02 | 0x03 => Mbc::MBC1(Mbc1::new(header)),
             _ => return Err("mapper not implemented"),
         };
 
@@ -315,9 +419,37 @@ impl Mbc {
 }
 
 #[derive(Default)]
-struct Mbc1 {
+pub(crate) struct Mbc1 {
+    is_big_cart: bool,
     ram_enable: bool,
     mode: bool,
-    rom_bank: u16,
-    ram_bank: u16,
+    rom_bank: u8,
+    ram_bank: u8,
+}
+impl Mbc1 {
+    pub fn new(header: &RomData) -> Self {
+        Self {
+            is_big_cart: header.rom_size > 512 * 1024 && header.ram_size > 8 * 1024,
+            ..Default::default()
+        }
+    }
+
+    pub fn update(&self, bus: &mut Bus) {
+        // only big carts care about mode
+        if self.is_big_cart {
+            if self.mode {
+                bus.rom0_banking.map(self.ram_bank << 5);
+                bus.sram_banking.map(self.ram_bank);
+            } else {
+                bus.rom0_banking.map(0);
+                bus.sram_banking.map(0);
+            }
+
+            bus.rom1_banking.map((self.ram_bank << 5) | self.rom_bank);
+        } else {
+            bus.rom0_banking.map(0);
+            bus.rom1_banking.map(self.rom_bank);
+            bus.sram_banking.map(self.ram_bank);
+        }
+    }
 }

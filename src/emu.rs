@@ -67,9 +67,8 @@ impl GbEmulator {
             CpuSm83::new_bootless()
         };
 
-        let mapper = game.header.mapper;
         Ok(Self {
-            mbc: Mbc::new(mapper)?,
+            mbc: Mbc::new(&game.header)?,
 
             cpu,
             ppu: Ppu::new(),

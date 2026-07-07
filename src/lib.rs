@@ -26,7 +26,7 @@ mod timer {
         clock_select: Mode,
         tac_enable: bool,
 
-        #[bits(5)]
+        #[bits(5, default = 0x1f)]
         _unused: u8,
     }
 
@@ -61,7 +61,7 @@ mod serial {
     pub struct Ctrl {
         clock_master: bool,
         clock_speed: bool,
-        #[bits(5)]
+        #[bits(5, default = 0x1f)]
         _unused: u8,
         transfer_enable: bool,
     }
@@ -90,6 +90,7 @@ mod serial {
 mod dma {
     pub struct Dma {
         pub init_cycle: bool,
+        pub start: u8,
         pub addr: Option<u16>,
     }
 
@@ -98,11 +99,17 @@ mod dma {
             Self {
                 init_cycle: false,
                 addr: None,
+                start: 0xff,
             }
+        }
+
+        pub fn read(&self) -> u8 {
+            self.start
         }
 
         pub fn write(&mut self, val: u8) {
             self.init_cycle = true;
+            self.start = val;
             self.addr = Some((val as u16) << 8);
         }
     }
@@ -159,7 +166,7 @@ pub mod joypad {
                 0x0f
             };
 
-            ((!self.btns_select) as u8) << 5 | ((!self.dpad_select) as u8) << 4 | pressed
+            ((!self.btns_select) as u8) << 5 | ((!self.dpad_select) as u8) << 4 | pressed | 0xc0
         }
 
         pub fn write(&mut self, val: u8) {
@@ -260,6 +267,7 @@ impl GbEmulator {
 
             if offset == 255 {
                 self.dma.addr = None;
+                self.dma.start = 0xff;
             } else {
                 self.dma.addr = Some(addr + 1);
             }
