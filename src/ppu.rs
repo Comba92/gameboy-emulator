@@ -1,4 +1,4 @@
-use crate::emu::{GbEmulator, SCREEN_WIDTH};
+use crate::emu::{FRAMEBUF_SIZE, GbEmulator, SCREEN_WIDTH};
 use bitfields::{bitfield, bitflag};
 use std::collections::{HashMap, VecDeque};
 
@@ -48,16 +48,14 @@ pub struct Stat {
 struct FifoPixel {
     #[bits(2)]
     color: u8,
-
+    dmg_palette: bool,
     #[bits(3)]
-    palette: u8,
-
+    cgb_palette: u8,
     #[bits(4)]
     idx: u8,
-
     priority: bool,
 
-    #[bits(6)]
+    #[bits(5)]
     _unused: u8,
 }
 
@@ -136,6 +134,9 @@ pub struct Ppu {
     pub scx: u8,
     pub wy: u8,
     pub wx: u8,
+    pub bgp: u8,
+    pub obp0: u8,
+    pub obp1: u8,
 
     wlc: u8,
     wy_eq_ly: bool,
@@ -143,16 +144,12 @@ pub struct Ppu {
 
     stat_intr: bool,
 
-    pub bgp: u8,
-    pub obp0: u8,
-    pub obp1: u8,
-
-    pub dot: u16,
+    dot: u16,
     pixel_idx: usize,
 
     fetch_coarse_x: u8,
     fetch_fine_x: i16,
-    fetch_scrolled: bool,
+    fetch_scrolled: Option<u8>,
 
     bg_fifo: VecDeque<FifoPixel>,
     bg_fetch: BgFetcherState,
@@ -170,6 +167,10 @@ impl Ppu {
             ..Default::default()
         }
     }
+
+    pub fn obj_size(&self) -> u8 {
+        if self.lcdc.obj_size() { 16 } else { 8 }
+    }
 }
 
 impl GbEmulator {
@@ -179,19 +180,36 @@ impl GbEmulator {
         let was_enabled = ppu.lcdc.lcd_enable();
         ppu.lcdc = Ctrl::from_bits(val);
 
-        // TODO
         // turn on
         if !was_enabled && ppu.lcdc.lcd_enable() {
+            ppu.pixel_idx = 0;
+            self.enter_scanline();
         }
         // turn off
         else if was_enabled && !ppu.lcdc.lcd_enable() {
+            ppu.stat.set_mode(Mode::HBlank);
+            ppu.stat.set_lyc_eq_ly(false);
+
+            ppu.dot = 0;
+            ppu.ly = 0;
+            ppu.wlc = 0;
+            ppu.wy_eq_ly = false;
+            ppu.pixel_idx = 0;
+            ppu.wnd_rendering = false;
+            ppu.fetch_coarse_x = 0;
+            ppu.fetch_fine_x = -8;
+            ppu.fetch_scrolled = None;
+            ppu.bg_fifo.clear();
+            ppu.obj_fifo.clear();
+            ppu.obj_buf.clear();
+            ppu.obj_pos_x.clear();
         }
     }
 
     fn oam_scan_tick(&mut self) {
         let ppu = &mut self.ppu;
 
-        if ppu.dot % 2 == 1 || ppu.obj_buf.len() > 10 {
+        if ppu.dot % 2 == 1 || ppu.obj_buf.len() >= 10 {
             return;
         }
 
@@ -199,10 +217,7 @@ impl GbEmulator {
         let obj = &self.bus.oam[obj_start..obj_start + 4];
 
         let y = obj[0];
-        let obj_size = if ppu.lcdc.obj_size() { 16 } else { 8 };
-        // let dist = (ppu.ly as i16 + 16) - y;
-        if y <= ppu.ly + 16 && ppu.ly + 16 < y + obj_size {
-            // if 0 <= dist && dist < obj_size {
+        if y <= ppu.ly + 16 && ppu.ly + 16 < y + ppu.obj_size() {
             let obj = Object::new(obj, ppu.obj_buf.len() as u8);
             ppu.obj_buf.push(obj);
         }
@@ -254,15 +269,32 @@ impl GbEmulator {
     }
 
     fn fetch_obj(&mut self, obj_idx: u8) -> (u8, u8) {
-        let obj = &self.ppu.obj_buf[obj_idx as usize];
-        let tile_id = obj.tile_id;
+        let ppu = &self.ppu;
 
-        let offset = 2 * (self.ppu.ly + 16 - obj.y) as u16;
+        let obj = &ppu.obj_buf[obj_idx as usize];
+        let mut tile_id = obj.tile_id;
+        if ppu.lcdc.obj_size() {
+            tile_id &= !1;
+        }
+
+        let row = (self.ppu.ly + 16 - obj.y) as u16;
+        let offset = if obj.attr.flip_y() {
+            2 * (ppu.obj_size() as u16 - 1 - row)
+        } else {
+            2 * row
+        };
+
         let tile_start = 0x8000 | (16 * tile_id as u16);
         let tile_addr = tile_start | offset;
+        let flip_x = obj.attr.flip_x();
 
-        let tile_lo = self.dispatch_read(tile_addr);
-        let tile_hi = self.dispatch_read(tile_addr + 1);
+        let mut tile_lo = self.dispatch_read(tile_addr);
+        let mut tile_hi = self.dispatch_read(tile_addr + 1);
+
+        if !flip_x {
+            tile_lo = tile_lo.reverse_bits();
+            tile_hi = tile_hi.reverse_bits();
+        }
 
         (tile_lo, tile_hi)
     }
@@ -270,6 +302,7 @@ impl GbEmulator {
     fn drawing_tick(&mut self) {
         let ppu = &mut self.ppu;
 
+        // window collision check
         if !ppu.wnd_rendering
             && ppu.lcdc.bg_wnd_priority()
             && ppu.lcdc.wnd_enable()
@@ -285,6 +318,7 @@ impl GbEmulator {
             ppu.wnd_rendering = true;
         }
 
+        // object collision check
         if matches!(ppu.obj_fetch, ObjFetcherState::Idle) {
             if let Some(obj_idx) = ppu.obj_pos_x.get(&(ppu.fetch_fine_x + 8)).copied() {
                 ppu.bg_fetch = BgFetcherState::Idle;
@@ -325,17 +359,13 @@ impl GbEmulator {
                         ppu.bg_fifo.push_back(pixel);
                     }
 
-                    let scroll = ppu.scx % 8;
-                    ppu.bg_fetch = if scroll > 0 && !ppu.fetch_scrolled {
+                    ppu.bg_fetch = if let Some(scroll) = ppu.fetch_scrolled.take() {
                         // scroll scx % 8 pixels
                         BgFetcherState::Discard { amt: scroll - 1 }
                     } else {
                         BgFetcherState::start(ppu.scx, ppu.scy)
                     };
 
-                    ppu.bg_fetch = BgFetcherState::start(ppu.scx, ppu.scy);
-
-                    ppu.fetch_scrolled = true;
                     ppu.fetch_coarse_x += 1;
                 }
             }
@@ -373,19 +403,33 @@ impl GbEmulator {
                 tile_lo,
                 tile_hi,
             } => {
+                let obj = &ppu.obj_buf[obj_idx as usize];
+
+                // if the OAM FIFO doesn’t have at least 8 pixels in it then transparent pixels with the lowest priority are pushed onto the OAM FIFO.
+                while ppu.obj_fifo.len() < 8 {
+                    ppu.obj_fifo.push_back(0.into());
+                }
+
                 for i in (0..8).rev() {
+                    // if i as i16 + ppu.fetch_fine_x < 0 { continue; }
+
                     let lo = (tile_lo >> i) & 1;
                     let hi = (tile_hi >> i) & 1;
                     let color = (hi << 1) | lo;
-                    let new_pixel = FifoPixelBuilder::new().with_color(color).build();
+                    let new_pixel = FifoPixelBuilder::new()
+                        .with_color(color)
+                        .with_priority(obj.attr.priority())
+                        .with_dmg_palette(obj.attr.dmg_palette())
+                        .with_idx(obj.idx)
+                        .build();
 
-                    // if let Some(old_pixel) = ppu.obj_fifo.get_mut(i) {
-                    //     if old_pixel.color() == 0 {
-                    //         // *old_pixel = new_pixel;
-                    //     }
-                    // } else {
-                    ppu.obj_fifo.push_back(new_pixel);
-                    // }
+                    if let Some(old_pixel) = ppu.obj_fifo.get_mut(i) {
+                        if old_pixel.color() == 0 {
+                            *old_pixel = new_pixel;
+                        }
+                    } else {
+                        ppu.obj_fifo.push_back(new_pixel);
+                    }
                 }
 
                 ppu.obj_fetch = ObjFetcherState::Idle;
@@ -403,9 +447,15 @@ impl GbEmulator {
             let bg_pixel = ppu.bg_fifo.pop_front().unwrap();
             let obj_pixel = ppu.obj_fifo.pop_front().unwrap_or(0.into());
 
-            if ppu.lcdc.obj_enable() && obj_pixel.color() > 0 {
-                // TODO: obj palette
-                self.push_pixel(obj_pixel.color());
+            if ppu.lcdc.obj_enable() && obj_pixel.color() > 0 && (!obj_pixel.priority() || bg_pixel.color() == 0) {
+                let pal = if obj_pixel.dmg_palette() {
+                    ppu.obp1
+                } else {
+                    ppu.obp0
+                };
+
+                let color_id = (pal >> (2 * obj_pixel.color())) & 0x3;
+                self.push_pixel(color_id);
             } else if ppu.lcdc.bg_wnd_priority() {
                 let color_id = (ppu.bgp >> (2 * bg_pixel.color())) & 0x3;
                 self.push_pixel(color_id);
@@ -449,16 +499,16 @@ impl GbEmulator {
         // we wait for the first 6 steps, then fetch and push on the 7th;
         ppu.bg_fetch = BgFetcherState::start(ppu.scx, ppu.scy);
         ppu.bg_fifo.clear();
+        ppu.fetch_scrolled = if (ppu.scx % 8) > 0 { Some(ppu.scx % 8) } else { None };
+        ppu.wnd_rendering = false;
 
         ppu.obj_fetch = ObjFetcherState::Idle;
         ppu.obj_fifo.clear();
         ppu.obj_buf.clear();
         ppu.obj_pos_x.clear();
 
-        ppu.fetch_scrolled = false;
         ppu.fetch_coarse_x = 0;
         ppu.fetch_fine_x = -8;
-        ppu.wnd_rendering = false;
 
         if ppu.wy == ppu.ly {
             ppu.wy_eq_ly = true;
@@ -486,6 +536,14 @@ impl GbEmulator {
 
     pub fn ppu_step(&mut self) {
         let ppu = &mut self.ppu;
+        if !ppu.lcdc.lcd_enable() {
+            ppu.pixel_idx += 4;
+            if ppu.pixel_idx >= FRAMEBUF_SIZE {
+                self.output.frame_ready = true;
+                ppu.pixel_idx = 0;
+            }
+            return;
+        }
 
         match ppu.stat.mode() {
             Mode::OAMScan => {
@@ -495,7 +553,8 @@ impl GbEmulator {
                 ppu.dot += 1;
                 if ppu.dot >= OAM_SCAN_DOTS {
                     ppu.obj_buf
-                        .sort_by(|a, b| a.x.cmp(&b.x).then(a.idx.cmp(&b.idx)));
+                        .sort_by(|a, b| a.x.cmp(&b.x).then(b.idx.cmp(&a.idx)));
+                    // TODO: not sure why should compare b.idx against a.idx (reversed)
 
                     ppu.obj_pos_x.extend(
                         ppu.obj_buf

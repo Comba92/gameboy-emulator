@@ -6,6 +6,12 @@ pub mod emu;
 mod ppu;
 mod rom;
 
+mod timer {
+    pub struct Timer {
+
+    }
+}
+
 mod serial {
     use bitfields::bitfield;
 
@@ -71,8 +77,8 @@ pub mod joypad {
         Down = 3,
         A = 4,
         B = 5,
-        Start = 6,
-        Select = 7,
+        Select = 6,
+        Start = 7,
     }
 
     #[bitfield(u8)]

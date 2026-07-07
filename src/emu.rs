@@ -64,6 +64,8 @@ impl GbEmulator {
 
             cpu: CpuSm83::new(),
             ppu: Ppu::new(),
+            // TODO: always set bios to zero for now
+            // consider passing an option here too
             bus: Bus::new(game, bios.unwrap_or_else(|| vec![0; 0x100])),
             serial: Serial::new(),
             dma: Dma::new(),
@@ -283,6 +285,8 @@ impl<'a> GbBuilder<'a> {
 
     pub fn build(self) -> Result<GbEmulator, LoadError> {
         // games might be zipped!
+        println!("ROM OK: {}", self.rom.is_some());
+        println!("BIOS OK: {}", self.bios.is_some());
 
         let game = if let Some(rom) = self.rom {
             let res = match rom {

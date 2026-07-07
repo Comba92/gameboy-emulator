@@ -253,6 +253,7 @@ impl GbEmulator {
             0xff4a => self.ppu.wy = val,
             0xff4b => self.ppu.wx = val,
             0xff50 => {
+                println!("BIOS UNMAPPED");
                 if let Some(boot) = self.bus.bios.take() {
                     self.bus.rom[..0x100].copy_from_slice(&boot);
                 }
