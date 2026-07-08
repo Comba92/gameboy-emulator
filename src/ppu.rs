@@ -1,4 +1,7 @@
-use crate::emu::{FRAMEBUF_SIZE, GbEmulator, SCREEN_WIDTH};
+use crate::{
+    bus::Bus,
+    emu::{FRAMEBUF_SIZE, GbEmulator, SCREEN_WIDTH},
+};
 use bitfields::{bitfield, bitflag};
 use std::collections::{HashMap, VecDeque};
 
@@ -61,7 +64,7 @@ struct FifoPixel {
 }
 
 #[bitfield(u8)]
-struct ObjAttr {
+struct Attr {
     #[bits(3)]
     cgb_palette: u8,
     bank: bool,
@@ -76,7 +79,7 @@ struct Object {
     y: u8,
     x: u8,
     tile_id: u8,
-    attr: ObjAttr,
+    attr: Attr,
     idx: u8,
 }
 impl Object {
@@ -85,7 +88,7 @@ impl Object {
             y: bytes[0],
             x: bytes[1],
             tile_id: bytes[2],
-            attr: ObjAttr::from(bytes[3]),
+            attr: Attr::from(bytes[3]),
             idx,
         }
     }
@@ -93,9 +96,19 @@ impl Object {
 
 enum BgFetcherState {
     Idle,
-    Wait { count: u8, scx: u8, scy: u8 },
-    Push { tile_lo: u8, tile_hi: u8 },
-    Discard { amt: u8 },
+    Wait {
+        count: u8,
+        scx: u8,
+        scy: u8,
+    },
+    Push {
+        tile_lo: u8,
+        tile_hi: u8,
+        attr: Attr,
+    },
+    Discard {
+        amt: u8,
+    },
 }
 
 impl Default for BgFetcherState {
@@ -139,6 +152,12 @@ pub struct Ppu {
     pub bgp: u8,
     pub obp0: u8,
     pub obp1: u8,
+
+    // pub cgb_palettes: [u16; 64],
+    pub bgpi: u8,
+    pub bgpd: u8,
+    pub obpi: u8,
+    pub obpd: u8,
 
     wlc: u8,
     wy_eq_ly: bool,
@@ -226,7 +245,8 @@ impl GbEmulator {
         }
     }
 
-    fn fetch_bg(&mut self, scx: u8, scy: u8) -> (u8, u8) {
+    fn fetch_bg(&mut self, scx: u8, scy: u8) -> (u8, u8, Attr) {
+        let is_cgb = self.is_cgb();
         let ppu = &mut self.ppu;
 
         let (x, y, tilemap) = if ppu.wnd_rendering {
@@ -245,15 +265,15 @@ impl GbEmulator {
             (x, y, tilemap)
         };
 
-        let offset = (y + x) % 1024;
-
-        let tile_id = self.bus.vram_direct_read(tilemap | offset);
+        let tilemap_offset = (y + x) % 1024;
+        let tilemap_addr = tilemap | tilemap_offset;
+        let tile_id = self.bus.vram0_read(tilemap_addr);
 
         let ppu = &mut self.ppu;
-        let offset = if ppu.wnd_rendering {
-            2 * (self.ppu.wlc as u16 % 8)
+        let row = if ppu.wnd_rendering {
+            ppu.wlc as u16 % 8
         } else {
-            2 * ((self.ppu.ly as u16 + scy as u16) % 8)
+            (ppu.ly as u16 + scy as u16) % 8
         };
 
         let tile_start = if self.ppu.lcdc.bg_wnd_tiles() {
@@ -264,11 +284,40 @@ impl GbEmulator {
             let offset = 16 * tile_id as i8 as i32;
             (0x9000 + offset) as u16
         };
-        let tile_addr = tile_start | offset;
 
-        let tile_lo = self.bus.vram_direct_read(tile_addr);
-        let tile_hi = self.bus.vram_direct_read(tile_addr + 1);
-        (tile_lo, tile_hi)
+        if is_cgb {
+            let attr = Attr::from_bits(self.bus.vram1_read(tilemap_addr));
+            let offset = if attr.flip_y() {
+                2 * (7 - row)
+            } else {
+                2 * row
+            };
+            let tile_addr = tile_start | offset;
+
+            let tile_fetch = if attr.bank() {
+                Bus::vram1_read
+            } else {
+                Bus::vram0_read
+            };
+
+            let mut tile_lo = tile_fetch(&self.bus, tile_addr);
+            let mut tile_hi = tile_fetch(&self.bus, tile_addr + 1);
+
+            if attr.flip_x() {
+                tile_lo = tile_lo.reverse_bits();
+                tile_hi = tile_hi.reverse_bits();
+            }
+
+            (tile_lo, tile_hi, attr)
+        } else {
+            let offset = 2 * row;
+            let tile_addr = tile_start | offset;
+
+            let tile_lo = self.bus.vram0_read(tile_addr);
+            let tile_hi = self.bus.vram0_read(tile_addr + 1);
+
+            (tile_lo, tile_hi, Attr::new())
+        }
     }
 
     fn fetch_obj(&mut self, obj_idx: u8) -> (u8, u8) {
@@ -291,8 +340,14 @@ impl GbEmulator {
         let tile_addr = tile_start | offset;
         let flip_x = obj.attr.flip_x();
 
-        let mut tile_lo = self.bus.vram_direct_read(tile_addr);
-        let mut tile_hi = self.bus.vram_direct_read(tile_addr + 1);
+        let tile_fetch = if obj.attr.bank() {
+            Bus::vram1_read
+        } else {
+            Bus::vram0_read
+        };
+
+        let mut tile_lo = tile_fetch(&self.bus, tile_addr);
+        let mut tile_hi = tile_fetch(&self.bus, tile_addr + 1);
 
         if !flip_x {
             tile_lo = tile_lo.reverse_bits();
@@ -303,11 +358,12 @@ impl GbEmulator {
     }
 
     fn drawing_tick(&mut self) {
+        let is_cgb = self.is_cgb();
         let ppu = &mut self.ppu;
 
         // window collision check
         if !ppu.wnd_rendering
-            && ppu.lcdc.bg_wnd_priority()
+            && (ppu.lcdc.bg_wnd_priority() || is_cgb)
             && ppu.lcdc.wnd_enable()
             && ppu.wy_eq_ly
             && ppu.fetch_fine_x as i16 >= ppu.wx as i16 - 7
@@ -338,8 +394,12 @@ impl GbEmulator {
                     //     ppu.fetch_fine_x += 8;
                     //     BgFetcherState::start(ppu.scx, ppu.scy)
                     // } else {
-                    let (tile_lo, tile_hi) = self.fetch_bg(scx, scy);
-                    BgFetcherState::Push { tile_lo, tile_hi }
+                    let (tile_lo, tile_hi, attr) = self.fetch_bg(scx, scy);
+                    BgFetcherState::Push {
+                        tile_lo,
+                        tile_hi,
+                        attr,
+                    }
                     // }
                 } else {
                     BgFetcherState::Wait {
@@ -350,14 +410,22 @@ impl GbEmulator {
                 }
             }
 
-            BgFetcherState::Push { tile_lo, tile_hi } => {
+            BgFetcherState::Push {
+                tile_lo,
+                tile_hi,
+                attr,
+            } => {
                 if ppu.bg_fifo.len() <= 8 {
                     // push instantly
                     for i in (0..8).rev() {
                         let lo = (tile_lo >> i) & 1;
                         let hi = (tile_hi >> i) & 1;
                         let color = (hi << 1) | lo;
-                        let pixel = FifoPixelBuilder::new().with_color(color).build();
+                        let pixel = FifoPixelBuilder::new()
+                            .with_color(color)
+                            .with_priority(attr.priority())
+                            .with_cgb_palette(attr.cgb_palette())
+                            .build();
 
                         ppu.bg_fifo.push_back(pixel);
                     }
@@ -414,8 +482,6 @@ impl GbEmulator {
                 }
 
                 for i in (0..8).rev() {
-                    // if i as i16 + ppu.fetch_fine_x < 0 { continue; }
-
                     let lo = (tile_lo >> i) & 1;
                     let hi = (tile_hi >> i) & 1;
                     let color = (hi << 1) | lo;
@@ -423,6 +489,7 @@ impl GbEmulator {
                         .with_color(color)
                         .with_priority(obj.attr.priority())
                         .with_dmg_palette(obj.attr.dmg_palette())
+                        .with_cgb_palette(obj.attr.cgb_palette())
                         .with_idx(obj.idx)
                         .build();
 
@@ -447,6 +514,25 @@ impl GbEmulator {
             let bg_pixel = ppu.bg_fifo.pop_front().unwrap();
             let obj_pixel = ppu.obj_fifo.pop_front().unwrap_or(0.into());
 
+            // if is_cgb {
+            //     let obj_has_priority = bg_pixel.color() == 0
+            //         || !ppu.lcdc.bg_wnd_priority()
+            //         || (!bg_pixel.priority() && !obj_pixel.priority());
+
+            //     if ppu.lcdc.obj_enable() && obj_has_priority {
+            //         let pal = if obj_pixel.dmg_palette() {
+            //             ppu.obp1
+            //         } else {
+            //             ppu.obp0
+            //         };
+
+            //         let color_id = (pal >> (2 * obj_pixel.color())) & 0x3;
+            //         self.push_pixel(color_id);
+            //     } else {
+            //         let color_id = (ppu.bgp >> (2 * bg_pixel.color())) & 0x3;
+            //         self.push_pixel(color_id);
+            //     }
+            // } else {
             if ppu.lcdc.obj_enable()
                 && obj_pixel.color() > 0
                 && (!obj_pixel.priority() || bg_pixel.color() == 0)
@@ -465,6 +551,7 @@ impl GbEmulator {
             } else {
                 self.push_pixel(0);
             }
+            // }
 
             self.ppu.fetch_fine_x += 1;
         }
@@ -559,9 +646,15 @@ impl GbEmulator {
                 let ppu = &mut self.ppu;
                 ppu.dot += 1;
                 if ppu.dot >= OAM_SCAN_DOTS {
-                    ppu.obj_buf
-                        .sort_by(|a, b| a.x.cmp(&b.x).then(b.idx.cmp(&a.idx)));
-                    // TODO: not sure why should compare b.idx against a.idx (reversed)
+                    let is_cgb = self.is_cgb();
+                    let ppu = &mut self.ppu;
+                    if is_cgb {
+                        ppu.obj_buf.sort_by(|a, b| a.idx.cmp(&b.idx))
+                    } else {
+                        // TODO: not sure why should compare b.idx against a.idx (reversed)
+                        ppu.obj_buf
+                            .sort_by(|a, b| a.x.cmp(&b.x).then(b.idx.cmp(&a.idx)));
+                    }
 
                     ppu.obj_pos_x.extend(
                         ppu.obj_buf

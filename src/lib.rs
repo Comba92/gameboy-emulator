@@ -289,7 +289,7 @@ impl GbEmulator {
 
     pub(crate) fn serial_step(&mut self) {
         // TODO: cache clock speed...
-        let clock_target = if self.rom_info().is_cgb() {
+        let clock_target = if self.is_cgb() {
             let hz = if self.serial.ctrl.clock_speed() {
                 262144
             } else {

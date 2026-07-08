@@ -5,7 +5,7 @@ use crate::{
     dma::Dma,
     joypad::Joypad,
     ppu::{DMG_PALETTE, Ppu},
-    rom::{Cart, RomData, is_valid_bios},
+    rom::{self, Cart, RomData, is_valid_bios},
     serial::Serial,
     timer::Timer,
 };
@@ -93,8 +93,12 @@ impl GbEmulator {
         GbBuilder::default()
     }
 
-    pub const fn rom_info(&self) -> &RomData {
+    pub fn rom_info(&self) -> &RomData {
         &self.bus.header
+    }
+
+    pub fn is_cgb(&self) -> bool {
+        self.rom_info().is_cgb()
     }
 
     pub fn step(&mut self) {

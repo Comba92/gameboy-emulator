@@ -85,7 +85,9 @@ pub(crate) struct Bus {
     rom1_banking: Banker,
     sram_banking: Banker,
     wram_banking: Banker,
+    wram_bank_select: u8,
     vram_banking: Banker,
+    vram_bank_select: u8,
 
     map: [Handler; 16],
 }
@@ -112,6 +114,8 @@ impl Bus {
             sram_banking: Banker::new(SRAM_BANK_SIZE, 0),
             wram_banking: Banker::new(WRAM_BANK_SIZE, 0),
             vram_banking: Banker::new(VRAM_BANK_SIZE, 0),
+            wram_bank_select: 1,
+            vram_bank_select: 0,
 
             map: std::array::from_fn(|_| Handler::Debug),
         }
@@ -149,6 +153,8 @@ impl Bus {
             sram_banking: Banker::new(SRAM_BANK_SIZE, cart.header.ram_size),
             wram_banking: Banker::new(WRAM_BANK_SIZE, wram_size),
             vram_banking: Banker::new(VRAM_BANK_SIZE, vram_size),
+            wram_bank_select: 1,
+            vram_bank_select: 0,
 
             header: cart.header,
             map: DEFAULT_MAP,
@@ -194,7 +200,15 @@ impl Bus {
     }
 
     pub fn vram_direct_read(&self, addr: u16) -> u8 {
+        self.vram[self.vram_banking.translate(addr)]
+    }
+
+    pub fn vram0_read(&self, addr: u16) -> u8 {
         self.vram[addr as usize - 0x8000]
+    }
+
+    pub fn vram1_read(&self, addr: u16) -> u8 {
+        self.vram[(8 * 1024) | (addr as usize - 0x8000)]
     }
 
     pub fn oam_direct_read(&self, addr: u16) -> u8 {
@@ -215,11 +229,11 @@ impl GbEmulator {
             Handler::Rom0 => bus.rom[bus.rom0_banking.translate(addr)],
             Handler::Rom1 => bus.rom[bus.rom1_banking.translate(addr)],
             Handler::OpenBus => 0xff,
-            Handler::Vram => bus.vram[addr as usize - 0x8000],
+            Handler::Vram => bus.vram_direct_read(addr),
             Handler::Sram | Handler::SramReadOnly => bus.sram[bus.sram_banking.translate(addr)],
-            Handler::Mbc2Ram => bus.sram[addr as usize % 512],
-            Handler::Wram0 => bus.wram[addr as usize - 0x8000],
+            Handler::Wram0 => bus.wram[addr as usize - WRAM0_START as usize],
             Handler::Wram1 => bus.wram[bus.wram_banking.translate(addr)],
+            Handler::Mbc2Ram => bus.sram[addr as usize % 512],
             Handler::IO => 0xff,
             Handler::Debug => bus.wram[addr as usize],
         }
@@ -236,7 +250,7 @@ impl GbEmulator {
 
             Handler::Vram => {
                 if self.ppu.stat.mode() != ppu::Mode::Drawing {
-                    self.bus.vram_direct_read(addr)
+                    bus.vram_direct_read(addr)
                 } else {
                     0xff
                 }
@@ -257,12 +271,12 @@ impl GbEmulator {
 
         let handler = addr >> 12;
         match bus.map[handler as usize] {
-            Handler::Rom0 | Handler::Rom1 => self.prg_write(addr, val),
+            Handler::Rom0 | Handler::Rom1 => self.mbc(addr, val),
             Handler::OpenBus | Handler::SramReadOnly => {}
 
             Handler::Vram => {
                 if self.ppu.stat.mode() != ppu::Mode::Drawing {
-                    bus.vram[addr as usize - 0x8000] = val
+                    bus.vram[bus.vram_banking.translate(addr)] = val
                 }
             }
             Handler::Sram => bus.sram[bus.sram_banking.translate(addr)] = val,
@@ -313,23 +327,30 @@ impl GbEmulator {
             0xff4b => self.ppu.wx,
 
             0xff4c => {
-                if self.rom_info().is_cgb() {
+                if self.is_cgb() {
                     self.clock.sys.into_bits()
                 } else {
                     0xff
                 }
             }
             0xff4d => {
-                if self.rom_info().is_cgb() {
+                if self.is_cgb() {
                     self.clock.speed.into_bits()
+                } else {
+                    0xff
+                }
+            }
+            0xff4f => {
+                if self.is_cgb() {
+                    self.bus.vram_bank_select | !0x1
                 } else {
                     0xff
                 }
             }
 
             0xff70 => {
-                if self.rom_info().is_cgb() {
-                    self.bus.wram_banking.value
+                if self.is_cgb() {
+                    self.bus.wram_bank_select
                 } else {
                     0xff
                 }
@@ -396,13 +417,19 @@ impl GbEmulator {
             0xff4b => self.ppu.wx = val,
 
             0xff4c => {
-                if self.rom_info().is_cgb() && self.bus.boot_sector0.is_some() {
+                if self.is_cgb() && self.bus.boot_sector0.is_some() {
                     self.clock.sys = clock::Sys::from_bits_with_defaults(val)
                 }
             }
             0xff4d => {
-                if self.rom_info().is_cgb() {
+                if self.is_cgb() {
                     self.clock.speed.set_armed(val & 1 != 0);
+                }
+            }
+            0xff4f => {
+                if self.is_cgb() {
+                    self.bus.vram_banking.map((val & 1) as u16);
+                    self.bus.vram_bank_select = val & 1;
                 }
             }
 
@@ -418,8 +445,9 @@ impl GbEmulator {
             }
 
             0xff70 => {
-                if self.rom_info().is_cgb() {
+                if self.is_cgb() {
                     self.bus.wram_banking.map((val & 0x3).max(1) as u16);
+                    self.bus.wram_bank_select = val;
                 }
             }
 
@@ -431,7 +459,7 @@ impl GbEmulator {
         }
     }
 
-    pub fn prg_write(&mut self, addr: u16, val: u8) {
+    pub fn mbc(&mut self, addr: u16, val: u8) {
         match &mut self.mbc {
             Mbc::None => {}
             Mbc::Mbc1(m) => {
@@ -602,60 +630,6 @@ impl GbEmulator {
     }
 }
 
-#[derive(Debug)]
-struct Banker {
-    banks_count_mask: u16,
-    bank_size_mask: u16,
-    bank_size_shift: u8,
-    value: u8,
-    real_addr_start: u32,
-}
-
-impl Banker {
-    pub fn new(virt_size: usize, real_size: usize) -> Self {
-        // https://stackoverflow.com/questions/25787613/division-and-multiplication-by-power-of-2
-        let bank_size_shift = virt_size.ilog2() as u8;
-        // TODO: this doesn't work if bankSize is odd!
-        let bank_size_mask = virt_size.saturating_sub(1) as u16;
-
-        // TODO: if realSize < virtSize and there banks arent big enough, this becomes 0!!
-        // TODO: handle unconvetional realSizes (less tha 8KiB)
-        let banks_count = (real_size / virt_size) as u16;
-        // TODO: this doesn't work if banksCount is odd! (shouldnt happen as it
-        // depends on realSize, and it should always be power of two)
-        let banks_count_mask = banks_count.saturating_sub(1);
-
-        let res = Self {
-            value: 0,
-            banks_count_mask,
-            bank_size_mask,
-            bank_size_shift,
-            real_addr_start: 0,
-        };
-
-        res
-    }
-
-    pub fn map(&mut self, bank: u16) {
-        // some games might write bigger bank numbers than really avaible
-        // let bank = bank % self.banks_count;
-        // let bank = bank & (self.banks_count-1);
-        let bank = bank & self.banks_count_mask;
-
-        // we precompute the real index instead of keeping the bank number
-        // self.real_addr_start = bank * self.bank_size;
-        self.real_addr_start = (bank as u32) << self.bank_size_shift;
-        self.value = bank as u8;
-    }
-
-    pub fn translate(&self, addr: u16) -> usize {
-        // i do not expect to write outside the slots array here either.
-        // self.real_addr_start + (addr % self.bank_size)
-        // real index + offset
-        self.real_addr_start as usize | (addr & self.bank_size_mask) as usize
-    }
-}
-
 pub enum Mbc {
     None,
     Mbc1(Mbc1),
@@ -775,4 +749,55 @@ pub(crate) struct Mbc5 {
 pub(crate) struct Mbc7 {
     ram_enable0: bool,
     ram_enable1: bool,
+}
+
+#[derive(Debug)]
+struct Banker {
+    banks_count_mask: u16,
+    bank_size_mask: u16,
+    bank_size_shift: u8,
+    real_addr_start: u32,
+}
+
+impl Banker {
+    pub fn new(virt_size: usize, real_size: usize) -> Self {
+        // https://stackoverflow.com/questions/25787613/division-and-multiplication-by-power-of-2
+        let bank_size_shift = virt_size.ilog2() as u8;
+        // TODO: this doesn't work if bankSize is odd!
+        let bank_size_mask = virt_size.saturating_sub(1) as u16;
+
+        // TODO: if realSize < virtSize and there banks arent big enough, this becomes 0!!
+        // TODO: handle unconvetional realSizes (less tha 8KiB)
+        let banks_count = (real_size / virt_size) as u16;
+        // TODO: this doesn't work if banksCount is odd! (shouldnt happen as it
+        // depends on realSize, and it should always be power of two)
+        let banks_count_mask = banks_count.saturating_sub(1);
+
+        let res = Self {
+            banks_count_mask,
+            bank_size_mask,
+            bank_size_shift,
+            real_addr_start: 0,
+        };
+
+        res
+    }
+
+    pub fn map(&mut self, bank: u16) {
+        // some games might write bigger bank numbers than really avaible
+        // let bank = bank % self.banks_count;
+        // let bank = bank & (self.banks_count-1);
+        let bank = bank & self.banks_count_mask;
+
+        // we precompute the real index instead of keeping the bank number
+        // self.real_addr_start = bank * self.bank_size;
+        self.real_addr_start = (bank as u32) << self.bank_size_shift;
+    }
+
+    pub fn translate(&self, addr: u16) -> usize {
+        // i do not expect to write outside the slots array here either.
+        // self.real_addr_start + (addr % self.bank_size)
+        // real index + offset
+        self.real_addr_start as usize | (addr & self.bank_size_mask) as usize
+    }
 }

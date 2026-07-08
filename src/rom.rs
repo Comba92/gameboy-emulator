@@ -67,7 +67,7 @@ pub struct RomData {
 impl RomData {
     pub fn is_cgb(&self) -> bool {
         // When using any CGB registers (including those in the Video/Link chapters), you must first unlock CGB features by changing byte 0143 in the cartridge header.
-        self.mode != ConsoleMode::DMG
+        self.mode == ConsoleMode::CGBOnly
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, &'static str> {
