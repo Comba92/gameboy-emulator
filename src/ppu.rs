@@ -7,7 +7,7 @@ pub const DMG_PALETTE: [(u8, u8, u8); 4] =
 
 pub const OAM_SCAN_DOTS: u16 = 80;
 pub const SCANLINE_DOTS: u16 = 456;
-pub const SCANLINES: u8 = 153;
+pub const SCANLINES: u8 = 154;
 
 #[bitfield(u8)]
 pub struct Ctrl {
@@ -129,6 +129,7 @@ enum ObjFetcherState {
 pub struct Ppu {
     pub lcdc: Ctrl,
     pub ly: u8,
+    pub ly_read: u8,
     pub lyc: u8,
     pub stat: Stat,
     pub scy: u8,
@@ -149,14 +150,14 @@ pub struct Ppu {
     pixel_idx: usize,
 
     fetch_coarse_x: u8,
-    fetch_fine_x: i16,
+    fetch_fine_x: u16,
     fetch_scrolled: Option<u8>,
 
     bg_fifo: VecDeque<FifoPixel>,
     bg_fetch: BgFetcherState,
 
     obj_buf: Vec<Object>,
-    obj_pos_x: HashMap<i16, u8>,
+    obj_pos_x: HashMap<u16, u8>,
     obj_fetch: ObjFetcherState,
     obj_fifo: VecDeque<FifoPixel>, // TODO: this should always have 8 transparent pixels ready!!
 }
@@ -164,7 +165,6 @@ pub struct Ppu {
 impl Ppu {
     pub fn new() -> Self {
         Self {
-            fetch_fine_x: -8,
             ..Default::default()
         }
     }
@@ -179,7 +179,7 @@ impl GbEmulator {
         let ppu = &mut self.ppu;
 
         let was_enabled = ppu.lcdc.lcd_enable();
-        ppu.lcdc = Ctrl::from_bits(val);
+        ppu.lcdc = Ctrl::from_bits_with_defaults(val);
 
         // turn on
         if !was_enabled && ppu.lcdc.lcd_enable() {
@@ -193,12 +193,13 @@ impl GbEmulator {
 
             ppu.dot = 0;
             ppu.ly = 0;
+            ppu.ly_read = 0;
             ppu.wlc = 0;
             ppu.wy_eq_ly = false;
             ppu.pixel_idx = 0;
             ppu.wnd_rendering = false;
             ppu.fetch_coarse_x = 0;
-            ppu.fetch_fine_x = -8;
+            ppu.fetch_fine_x = 0;
             ppu.fetch_scrolled = None;
             ppu.bg_fifo.clear();
             ppu.obj_fifo.clear();
@@ -308,13 +309,12 @@ impl GbEmulator {
             && ppu.lcdc.bg_wnd_priority()
             && ppu.lcdc.wnd_enable()
             && ppu.wy_eq_ly
-            && ppu.fetch_fine_x == ppu.wx as i16 - 7
+            && ppu.fetch_fine_x as i16 >= ppu.wx as i16 - 7
         {
             // we've reached the window
-            // a 6-dot penalty is incurred while the BG fetcher is being set up for the window.
             ppu.fetch_coarse_x = 0;
             ppu.bg_fetch = BgFetcherState::start(ppu.scx, ppu.scy);
-            ppu.fetch_scrolled = None;
+            ppu.fetch_scrolled = (ppu.wx < 7).then_some(7 - ppu.wx);
             ppu.bg_fifo.clear();
 
             ppu.wnd_rendering = true;
@@ -332,14 +332,14 @@ impl GbEmulator {
             BgFetcherState::Idle => {}
             BgFetcherState::Wait { count, scx, scy } => {
                 self.ppu.bg_fetch = if count == 0 {
-                    if ppu.fetch_fine_x < 0 {
-                        // first tile is discarded
-                        ppu.fetch_fine_x += 8;
-                        BgFetcherState::start(ppu.scx, ppu.scy)
-                    } else {
-                        let (tile_lo, tile_hi) = self.fetch_bg(scx, scy);
-                        BgFetcherState::Push { tile_lo, tile_hi }
-                    }
+                    // if ppu.fetch_fine_x < 0 {
+                    //     // first tile is discarded
+                    //     ppu.fetch_fine_x += 8;
+                    //     BgFetcherState::start(ppu.scx, ppu.scy)
+                    // } else {
+                    let (tile_lo, tile_hi) = self.fetch_bg(scx, scy);
+                    BgFetcherState::Push { tile_lo, tile_hi }
+                    // }
                 } else {
                     BgFetcherState::Wait {
                         count: count - 1,
@@ -483,7 +483,7 @@ impl GbEmulator {
     fn update_stat_intr(&mut self) {
         let ppu = &mut self.ppu;
 
-        ppu.stat.set_lyc_eq_ly(ppu.ly == ppu.lyc);
+        ppu.stat.set_lyc_eq_ly(ppu.ly_read == ppu.lyc);
 
         let intr = (ppu.stat.lyc_int() && ppu.stat.lyc_eq_ly())
             || (ppu.stat.mode0_int() && ppu.stat.mode() == Mode::HBlank)
@@ -517,7 +517,7 @@ impl GbEmulator {
         ppu.obj_pos_x.clear();
 
         ppu.fetch_coarse_x = 0;
-        ppu.fetch_fine_x = -8;
+        ppu.fetch_fine_x = 0;
 
         if ppu.wy == ppu.ly {
             ppu.wy_eq_ly = true;
@@ -569,7 +569,7 @@ impl GbEmulator {
                         ppu.obj_buf
                             .iter()
                             .enumerate()
-                            .map(|(idx, obj)| (obj.x as i16, idx as u8)),
+                            .map(|(idx, obj)| (obj.x as u16, idx as u8)),
                     );
 
                     ppu.stat.set_mode(Mode::Drawing);
@@ -579,7 +579,7 @@ impl GbEmulator {
                 self.drawing_tick();
 
                 self.ppu.dot += 1;
-                if self.ppu.fetch_fine_x >= SCREEN_WIDTH as i16 {
+                if self.ppu.fetch_fine_x >= SCREEN_WIDTH as u16 {
                     self.enter_hblank();
                 }
             }
@@ -589,6 +589,7 @@ impl GbEmulator {
                 if ppu.dot >= SCANLINE_DOTS {
                     ppu.dot = 0;
                     ppu.ly += 1;
+                    ppu.ly_read += 1;
 
                     if ppu.wnd_rendering {
                         ppu.wlc += 1;
@@ -604,12 +605,20 @@ impl GbEmulator {
             Mode::VBlank => {
                 ppu.dot += 1;
 
+                if ppu.ly_read == 153 && ppu.dot > 4 {
+                    // https://github.com/Ashiepaws/GBEDG/blob/master/bugs/index.md#flickering-line-in-intro-sequence
+                    // scanline 153 quirk
+                    ppu.ly_read = 0;
+                }
+
                 if ppu.dot >= SCANLINE_DOTS {
                     ppu.dot = 0;
                     ppu.ly += 1;
+                    ppu.ly_read += 1;
 
                     if ppu.ly >= SCANLINES {
                         ppu.ly = 0;
+                        ppu.ly_read = 0;
                         ppu.wlc = 0;
                         ppu.pixel_idx = 0;
                         ppu.wy_eq_ly = false;

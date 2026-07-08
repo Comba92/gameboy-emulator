@@ -47,11 +47,16 @@ pub struct RomData {
     pub revision: u8,
     pub mode: ConsoleMode,
     pub sgb: bool,
-    pub mapper: u8,
+    pub mbc: u8,
+    pub mbc_name: &'static str,
     pub rom_size: usize,
     pub ram_size: usize,
-    pub battery: bool,
     pub region: Region,
+
+    pub battery: bool,
+    pub timer: bool,
+    pub rumble: bool,
+    pub sensor: bool,
 }
 impl RomData {
     const MAGIC: [u8; 48] = [
@@ -83,7 +88,7 @@ impl RomData {
         };
 
         header.sgb = bytes[0x146] == 0x03;
-        header.mapper = bytes[0x147];
+        header.mbc = bytes[0x147];
 
         header.rom_size = match bytes[0x148] {
             0x52 => 1100 * 1024,
@@ -108,9 +113,20 @@ impl RomData {
         header.battery = [
             0x03, 0x06, 0x09, 0x0d, 0x0f, 0x10, 0x13, 0x1b, 0x1d, 0x1e, 0x22, 0xff,
         ]
-        .contains(&header.mapper);
+        .contains(&header.mbc);
+
+        header.timer = [0x0f, 0x10].contains(&header.mbc);
+        header.rumble = [0x1c, 0x1d, 0x1e, 0x22].contains(&header.mbc);
+        header.sensor = [0x22].contains(&header.mbc);
 
         header.revision = bytes[0x14c];
+        header.mbc_name = MBC_NAMES
+            .iter()
+            .find(|x| x.0 == header.mbc)
+            .map(|x| x.1)
+            .unwrap_or("Unknown");
+
+        println!("{header:?}");
 
         Ok(header)
     }
@@ -124,3 +140,39 @@ pub fn is_valid_rom(bytes: &[u8]) -> bool {
 pub fn is_valid_bios(bios: &[u8]) -> bool {
     bios.len() == 0x100
 }
+
+const MBC_NAMES: &[(u8, &'static str)] = &[
+    (0x00, "ROM Only"),
+    (0x01, "MBC1"),
+    (0x02, "MBC1"),
+    (0x03, "MBC1"),
+    (0x05, "MBC2"),
+    (0x06, "MBC2"),
+    (0x08, "ROM Only"),
+    (0x09, "ROM Only"),
+    (0x0B, "MMM01"),
+    (0x0C, "MMM01"),
+    (0x0D, "MMM01"),
+    (0x0F, "MBC3"),
+    (0x10, "MBC3"),
+    (0x11, "MBC3"),
+    (0x12, "MBC3"),
+    (0x13, "MBC3"),
+    (0x19, "MBC5"),
+    (0x1A, "MBC5"),
+    (0x1B, "MBC5"),
+    (0x1C, "MBC5"),
+    (0x1D, "MBC5"),
+    (0x1E, "MBC5"),
+    (0x20, "MBC6"),
+    (0x22, "MBC7"),
+    (0xFC, "Pocket Camera"),
+    (0xFD, "BANDAI TAMA5"),
+    (0xFE, "HuC3"),
+    (0xFF, "HuC1"),
+    // TODO: these require different methods to detect
+    (0xA0, "M161"),
+    (0xA1, "EMS"),
+    (0xA2, "Bung"),
+    (0xA3, "WisdomTree"),
+];

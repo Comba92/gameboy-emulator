@@ -147,7 +147,7 @@ impl Bus {
     }
 
     pub fn sram_enable(&mut self, cond: bool) {
-        if cond {
+        if cond && self.header.ram_size > 0 {
             self.sram_set(Handler::Sram);
         } else {
             self.sram_set(Handler::OpenBus);
@@ -155,8 +155,10 @@ impl Bus {
     }
 
     pub fn sram_set(&mut self, handler: Handler) {
-        self.map[0xa] = handler;
-        self.map[0xb] = handler;
+        if self.header.ram_size > 0 {
+            self.map[0xa] = handler;
+            self.map[0xb] = handler;
+        }
     }
 
     pub fn vram_direct_read(&self, addr: u16) -> u8 {
@@ -200,11 +202,11 @@ impl GbEmulator {
             Handler::OpenBus => 0xff,
 
             Handler::Vram => {
-                // if self.ppu.stat.mode() != ppu::Mode::Drawing {
-                self.bus.vram_direct_read(addr)
-                // } else {
-                // 0xff
-                // }
+                if self.ppu.stat.mode() != ppu::Mode::Drawing {
+                    self.bus.vram_direct_read(addr)
+                } else {
+                    0xff
+                }
             }
             Handler::Sram | Handler::SramReadOnly => bus.sram[bus.sram_banking.translate(addr)],
             Handler::Mbc2Ram => bus.sram[addr as usize % 512],
@@ -225,9 +227,9 @@ impl GbEmulator {
             Handler::OpenBus | Handler::SramReadOnly => {}
 
             Handler::Vram => {
-                // if self.ppu.stat.mode() != ppu::Mode::Drawing {
-                bus.vram[addr as usize - 0x8000] = val
-                // }
+                if self.ppu.stat.mode() != ppu::Mode::Drawing {
+                    bus.vram[addr as usize - 0x8000] = val
+                }
             }
             Handler::Sram => bus.sram[bus.sram_banking.translate(addr)] = val,
             Handler::Mbc2Ram => bus.sram[addr as usize % 512] = val & 0x0f,
@@ -264,7 +266,7 @@ impl GbEmulator {
             0xff41 => self.ppu.stat.into_bits(),
             0xff42 => self.ppu.scy,
             0xff43 => self.ppu.scx,
-            0xff44 => self.ppu.ly,
+            0xff44 => self.ppu.ly_read,
             // 0xff44 => 144,
             0xff45 => self.ppu.lyc,
             0xff46 => self.dma.read(),
@@ -275,7 +277,7 @@ impl GbEmulator {
             0xff4b => self.ppu.wx,
 
             0xffff => self.bus.inte.into_bits(),
-            _ => 0xff,
+            _ => 0, // careful: most games don't expect a 0xff from uninmplemented IO ports. 0 seems to fix it
         }
     }
 
@@ -296,7 +298,7 @@ impl GbEmulator {
             0xff00 => self.joy.write(val),
             0xff01 => self.serial.data = val,
             0xff02 => {
-                self.serial.ctrl = serial::Ctrl::from(val);
+                self.serial.ctrl = serial::Ctrl::from_bits_with_defaults(val);
                 // if self.serial.ctrl.transfer_enable() {
                 //     self.serial.out_buffer.push(self.serial.data);
                 //     let str = String::from_utf8_lossy(&self.serial.out_buffer);
@@ -306,10 +308,10 @@ impl GbEmulator {
             0xff04 => self.timer.div = 0,
             0xff05 => self.timer.tima = val,
             0xff06 => self.timer.tma = val,
-            0xff07 => self.timer.tac = timer::Ctrl::from_bits(val),
+            0xff07 => self.timer.tac = timer::Ctrl::from_bits_with_defaults(val),
 
             0xff0f => {
-                self.bus.intf = IntFlags::from(val);
+                self.bus.intf = IntFlags::from_bits_with_defaults(val);
             }
 
             0xff40 => {
@@ -340,7 +342,7 @@ impl GbEmulator {
             }
 
             0xffff => {
-                self.bus.inte = IntFlags::from(val);
+                self.bus.inte = IntFlags::from_bits_with_defaults(val);
             }
 
             _ => {}
@@ -584,7 +586,7 @@ pub enum Mbc {
 
 impl Mbc {
     pub fn new(bus: &mut Bus) -> Result<Self, String> {
-        let res = match bus.header.mapper {
+        let res = match bus.header.mbc {
             0x00 | 0x08 | 0x09 => Mbc::None,
             0x01 | 0x02 | 0x03 => Mbc::Mbc1(Mbc1::new(bus)),
             0x05 | 0x06 => {
@@ -615,7 +617,7 @@ impl Mbc {
 
             0xfe => Mbc::HuC3,
             0xff => Mbc::HuC1,
-            _ => return Err(format!("mapper {} not implemented", bus.header.mapper)),
+            _ => return Err(format!("mapper {} not implemented", bus.header.mbc)),
         };
 
         Ok(res)

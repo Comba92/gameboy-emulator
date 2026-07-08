@@ -44,7 +44,7 @@ mod timer {
                 div: 0,
                 tima: 0,
                 tma: 0,
-                tac: Ctrl::from_bits(0),
+                tac: Ctrl::new(),
                 div_counter: 0,
                 tima_counter: 0,
             }
@@ -69,7 +69,7 @@ mod serial {
         pub ctrl: Ctrl,
         pub out_buffer: Vec<u8>,
 
-        pub clock_count: f32,
+        pub clock_count: u32,
         pub sent: u8,
     }
     impl Serial {
@@ -78,7 +78,7 @@ mod serial {
                 data: 0xff,
                 ctrl: Ctrl::new(),
                 out_buffer: Vec::new(),
-                clock_count: 0.0,
+                clock_count: 0,
                 sent: 0,
             }
         }
@@ -156,12 +156,12 @@ pub mod joypad {
 
         pub fn read(&self) -> u8 {
             // Note that, rather unconventionally for the Game Boy, a button being pressed is seen as the corresponding bit being 0, not 1.
-            let pressed = if self.btns_select {
-                (!self.pressed.0) >> 4
-            } else if self.dpad_select {
-                (!self.pressed.0) & 0x0f
-            } else {
-                0x0f
+            let pressed = match (self.btns_select, self.dpad_select) {
+                (true, false) => (!self.pressed.0) >> 4,
+                (false, true) => (!self.pressed.0) & 0x0f,
+                // https://github.com/Ashiepaws/GBEDG/blob/master/bugs/index.md#bomberman-gb
+                (false, false) => ((!self.pressed.0) >> 4) | ((!self.pressed.0) & 0x0f), // both selected
+                (true, true) => 0xf, // both unselected
             };
 
             ((!self.btns_select) as u8) << 5 | ((!self.dpad_select) as u8) << 4 | pressed | 0xc0
@@ -199,11 +199,11 @@ impl GbEmulator {
         let div_clock_target = self.clock_rate() as u32 / 16384;
         let timer = &mut self.timer;
 
-        timer.div_counter += 1;
         if timer.div_counter >= div_clock_target {
             timer.div_counter -= div_clock_target;
             timer.div = timer.div.wrapping_add(1);
         }
+        timer.div_counter += 4;
 
         let tima_inc = match timer.tac.clock_select() {
             timer::Mode::M256 => 4096,
@@ -215,7 +215,6 @@ impl GbEmulator {
         let tima_clock_target = self.clock_rate() as u32 / tima_inc;
         let timer = &mut self.timer;
 
-        timer.tima_counter += 1;
         if timer.tima_counter >= tima_clock_target {
             timer.tima_counter -= tima_clock_target;
 
@@ -229,10 +228,11 @@ impl GbEmulator {
                 };
             }
         }
+        self.timer.tima_counter += 4;
     }
 
     pub(crate) fn serial_step(&mut self) {
-        let clock_target = self.clock_rate() as f32 / 8192.0;
+        let clock_target = self.clock_rate() as u32 / 8192;
         let serial = &mut self.serial;
 
         if serial.ctrl.clock_master() {
@@ -247,7 +247,7 @@ impl GbEmulator {
                     self.bus.intf.set_serial(true);
                 }
             }
-            serial.clock_count += 4.0; // 1 mcycle is 4 tcycles
+            serial.clock_count += 4; // 1 mcycle is 4 tcycles
         }
     }
 
