@@ -200,11 +200,11 @@ impl GbEmulator {
             Handler::OpenBus => 0xff,
 
             Handler::Vram => {
-                if self.ppu.stat.mode() != ppu::Mode::Drawing {
-                    self.bus.vram_direct_read(addr)
-                } else {
-                    0xff
-                }
+                // if self.ppu.stat.mode() != ppu::Mode::Drawing {
+                self.bus.vram_direct_read(addr)
+                // } else {
+                // 0xff
+                // }
             }
             Handler::Sram | Handler::SramReadOnly => bus.sram[bus.sram_banking.translate(addr)],
             Handler::Mbc2Ram => bus.sram[addr as usize % 512],
@@ -225,9 +225,9 @@ impl GbEmulator {
             Handler::OpenBus | Handler::SramReadOnly => {}
 
             Handler::Vram => {
-                if self.ppu.stat.mode() != ppu::Mode::Drawing {
-                    bus.vram[addr as usize - 0x8000] = val
-                }
+                // if self.ppu.stat.mode() != ppu::Mode::Drawing {
+                bus.vram[addr as usize - 0x8000] = val
+                // }
             }
             Handler::Sram => bus.sram[bus.sram_banking.translate(addr)] = val,
             Handler::Mbc2Ram => bus.sram[addr as usize % 512] = val & 0x0f,

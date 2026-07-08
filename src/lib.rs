@@ -263,10 +263,9 @@ impl GbEmulator {
             }
 
             let val = self.dispatch_read(addr);
-            let offset = addr & 0x00ff;
-            self.bus.oam_direct_write(0xfe00 | offset, val);
+            self.bus.oam_direct_write(0xfe00 | (addr & 0x00ff), val);
 
-            if offset == self.bus.oam.len() as u16 - 1 {
+            if addr & 0x00ff == 0x9f {
                 self.dma.addr = None;
                 self.dma.start = 0xff;
             } else {
