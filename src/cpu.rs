@@ -37,11 +37,11 @@ pub struct CpuSm83 {
 }
 
 impl CpuSm83 {
-    pub fn new_bootless() -> Self {
+    pub fn new_bootless_dmg() -> Self {
         let mut res = Self {
-            a: 1,
+            a: 0x01,
             f: Flags::from_bits(176),
-            pc: 0x101,
+            pc: 0x100,
             sp: 0xfffe,
             ..Default::default()
         };
@@ -53,11 +53,28 @@ impl CpuSm83 {
 
         res
     }
+
+    pub fn new_bootless_cgb() -> Self {
+        let mut res = Self {
+            a: 0x11,
+            f: FlagsBuilder::new().with_zero(true).build(),
+            pc: 0x100,
+            sp: 0xfffe,
+            ..Default::default()
+        };
+
+        res.de.set_hi(0xff);
+        res.de.set_lo(0x56);
+        res.hl.set_lo(0x0d);
+
+        res
+    }
 }
 
 impl GbEmulator {
     pub fn cpu_step(&mut self) {
         self.handle_interrupts();
+
         if self.cpu.halted {
             self.tick();
             return;
@@ -109,8 +126,11 @@ impl GbEmulator {
 
         self.ppu_step();
         self.ppu_step();
-        self.ppu_step();
-        self.ppu_step();
+        // Dots remain the same regardless of whether the CPU is in Double Speed mode, so there are 4 dots per Normal Speed M-cycle, and 2 per Double Speed M-cycle.
+        if !self.in_double_speed() {
+            self.ppu_step();
+            self.ppu_step();
+        }
     }
 }
 
@@ -801,7 +821,16 @@ impl GbEmulator {
     }
 
     fn stop(&mut self, _get: OpGet<u8>) {
-        // TODO
+        // TODO not implemented fully
+
+        if self.clock.speed.armed() {
+            self.clock.speed.set_armed(false);
+            self.clock.speed.set_speed(true);
+
+            for _ in 0..2050 {
+                self.tick();
+            }
+        }
     }
 
     fn halt(&mut self) {

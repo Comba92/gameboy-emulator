@@ -6,6 +6,52 @@ pub mod emu;
 mod ppu;
 mod rom;
 
+mod clock {
+    use bitfields::bitfield;
+
+    pub const DMG_CLOCK_RATE: usize = 4194304;
+    pub const CBG_CLOCK_RATE: usize = 2 * DMG_CLOCK_RATE;
+
+    #[bitfield(u8)]
+    pub struct Speed {
+        armed: bool,
+        #[bits(6, default = 0x3f)]
+        _unused: u8,
+        speed: bool,
+    }
+
+    #[bitfield(u8)]
+    pub struct Sys {
+        #[bits(2, default = 0x3)]
+        _unused0: u8,
+        compat_mode: bool,
+        #[bits(5, default = 0x1f)]
+        _unused1: u8,
+    }
+
+    pub struct Clock {
+        pub sys: Sys,
+        pub speed: Speed,
+    }
+
+    impl Clock {
+        pub fn new() -> Self {
+            Self {
+                sys: Sys::new(),
+                speed: Speed::new(),
+            }
+        }
+
+        pub fn rate(&self) -> usize {
+            if self.speed.speed() {
+                CBG_CLOCK_RATE
+            } else {
+                DMG_CLOCK_RATE
+            }
+        }
+    }
+}
+
 mod timer {
     use bitfields::{bitfield, bitflag};
 
@@ -175,6 +221,14 @@ pub mod joypad {
 }
 
 impl GbEmulator {
+    pub(crate) fn in_double_speed(&self) -> bool {
+        self.clock.speed.speed()
+    }
+
+    pub(crate) fn clock_rate(&self) -> usize {
+        self.clock.rate()
+    }
+
     pub fn set_button(&mut self, input: joypad::Input, state: bool) {
         let was_down = self.joy.pressed.get_bit(input as u32);
 
@@ -196,6 +250,7 @@ impl GbEmulator {
     }
 
     pub(crate) fn timer_step(&mut self) {
+        // TODO: cache clock speed
         let div_clock_target = self.clock_rate() as u32 / 16384;
         let timer = &mut self.timer;
 
@@ -212,6 +267,7 @@ impl GbEmulator {
             timer::Mode::M64 => 16384,
         };
 
+        // TODO: cache clock speed
         let tima_clock_target = self.clock_rate() as u32 / tima_inc;
         let timer = &mut self.timer;
 
@@ -232,7 +288,17 @@ impl GbEmulator {
     }
 
     pub(crate) fn serial_step(&mut self) {
-        let clock_target = self.clock_rate() as u32 / 8192;
+        // TODO: cache clock speed...
+        let clock_target = if self.rom_info().is_cgb() {
+            let hz = if self.serial.ctrl.clock_speed() {
+                262144
+            } else {
+                8192
+            };
+            clock::CBG_CLOCK_RATE as u32 / hz
+        } else {
+            clock::DMG_CLOCK_RATE as u32 / 8192
+        };
         let serial = &mut self.serial;
 
         if serial.ctrl.clock_master() {

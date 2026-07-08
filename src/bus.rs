@@ -1,4 +1,5 @@
 use crate::{
+    clock,
     emu::GbEmulator,
     ppu,
     rom::{self, Cart, RomData},
@@ -25,7 +26,8 @@ pub(crate) enum Handler {
     Vram, // Video RAM
     Sram, // Cartridge RAM
     SramReadOnly,
-    Wram, // Work RAM
+    Wram0,
+    Wram1,
     IO,
     OpenBus,
     Mbc2Ram,
@@ -47,8 +49,8 @@ const DEFAULT_MAP: [Handler; 16] = [
     Handler::Vram,
     Handler::OpenBus,
     Handler::OpenBus,
-    Handler::Wram,
-    Handler::Wram,
+    Handler::Wram0,
+    Handler::Wram1,
     Handler::IO,
     Handler::IO,
 ];
@@ -66,7 +68,8 @@ pub(crate) struct IntFlags {
 
 pub(crate) struct Bus {
     rom: Box<[u8]>,
-    bios: Option<Box<[u8]>>,
+    boot_sector0: Option<Box<[u8]>>,
+    boot_sector1: Option<Box<[u8]>>,
     pub header: RomData,
 
     pub intf: IntFlags,
@@ -81,6 +84,8 @@ pub(crate) struct Bus {
     rom0_banking: Banker,
     rom1_banking: Banker,
     sram_banking: Banker,
+    wram_banking: Banker,
+    vram_banking: Banker,
 
     map: [Handler; 16],
 }
@@ -89,7 +94,8 @@ impl Bus {
     pub fn with_ram_64kb() -> Self {
         Self {
             rom: Default::default(),
-            bios: Default::default(),
+            boot_sector0: Default::default(),
+            boot_sector1: Default::default(),
             header: Default::default(),
 
             intf: IntFlags::new(),
@@ -104,28 +110,45 @@ impl Bus {
             rom0_banking: Banker::new(ROM_BANK_SIZE, 0),
             rom1_banking: Banker::new(ROM_BANK_SIZE, 0),
             sram_banking: Banker::new(SRAM_BANK_SIZE, 0),
+            wram_banking: Banker::new(WRAM_BANK_SIZE, 0),
+            vram_banking: Banker::new(VRAM_BANK_SIZE, 0),
 
             map: std::array::from_fn(|_| Handler::Debug),
         }
     }
 
     pub fn new(mut cart: Cart, bios: Option<Vec<u8>>) -> Self {
+        let vram_size = if cart.header.is_cgb() {
+            VRAM_BANK_SIZE * 2
+        } else {
+            VRAM_BANK_SIZE
+        };
+
+        let wram_size = if cart.header.is_cgb() {
+            WRAM_BANK_SIZE * 8
+        } else {
+            WRAM_BANK_SIZE * 2
+        };
+
         let mut res = Self {
             rom: std::mem::take(&mut cart.rom).into_boxed_slice(),
-            bios: None,
+            boot_sector0: None,
+            boot_sector1: None,
 
             intf: IntFlags::new(),
             inte: IntFlags::new(),
 
             hram: [0xff; _],
             oam: [0xff; _],
-            vram: vec![0xff; 8 * 1024].into_boxed_slice(),
+            vram: vec![0xff; vram_size].into_boxed_slice(),
             sram: vec![0xff; cart.header.ram_size as usize].into_boxed_slice(),
-            wram: vec![0xff; 8 * 1024].into_boxed_slice(),
+            wram: vec![0xff; wram_size].into_boxed_slice(),
 
             rom0_banking: Banker::new(ROM_BANK_SIZE, cart.header.rom_size),
             rom1_banking: Banker::new(ROM_BANK_SIZE, cart.header.rom_size),
             sram_banking: Banker::new(SRAM_BANK_SIZE, cart.header.ram_size),
+            wram_banking: Banker::new(WRAM_BANK_SIZE, wram_size),
+            vram_banking: Banker::new(VRAM_BANK_SIZE, vram_size),
 
             header: cart.header,
             map: DEFAULT_MAP,
@@ -133,14 +156,23 @@ impl Bus {
 
         res.rom0_banking.map(0);
         res.rom1_banking.map(1);
+        res.vram_banking.map(0);
         res.sram_banking.map(0);
+        res.wram_banking.map(1);
 
         if let Some(bios) = bios {
             // at boot bios is mapped to the first 0x100 bytes
             // swap bios out with the first 0x100, set them back later
             let tmp = res.rom[..0x0100].to_vec();
-            res.rom[..0x0100].copy_from_slice(&bios);
-            res.bios = Some(tmp.into_boxed_slice());
+            res.rom[..0x0100].copy_from_slice(&bios[..0x100]);
+            res.boot_sector0 = Some(tmp.into_boxed_slice());
+
+            // cgb boot is bigger than 256 bytes, has a second sector
+            if bios.len() > 0x100 {
+                let tmp = res.rom[0x200..0x900].to_vec();
+                res.rom[0x200..0x900].copy_from_slice(&bios[0x200..]);
+                res.boot_sector1 = Some(tmp.into_boxed_slice());
+            }
         }
 
         res
@@ -186,7 +218,8 @@ impl GbEmulator {
             Handler::Vram => bus.vram[addr as usize - 0x8000],
             Handler::Sram | Handler::SramReadOnly => bus.sram[bus.sram_banking.translate(addr)],
             Handler::Mbc2Ram => bus.sram[addr as usize % 512],
-            Handler::Wram => bus.wram[addr as usize - 0xa000],
+            Handler::Wram0 => bus.wram[addr as usize - 0x8000],
+            Handler::Wram1 => bus.wram[bus.wram_banking.translate(addr)],
             Handler::IO => 0xff,
             Handler::Debug => bus.wram[addr as usize],
         }
@@ -210,7 +243,8 @@ impl GbEmulator {
             }
             Handler::Sram | Handler::SramReadOnly => bus.sram[bus.sram_banking.translate(addr)],
             Handler::Mbc2Ram => bus.sram[addr as usize % 512],
-            Handler::Wram => bus.wram[addr as usize - 0xc000],
+            Handler::Wram0 => bus.wram[addr as usize - WRAM0_START as usize],
+            Handler::Wram1 => bus.wram[bus.wram_banking.translate(addr)],
             Handler::IO => self.io_read(addr),
             Handler::Debug => bus.wram[addr as usize],
         };
@@ -232,9 +266,11 @@ impl GbEmulator {
                 }
             }
             Handler::Sram => bus.sram[bus.sram_banking.translate(addr)] = val,
-            Handler::Mbc2Ram => bus.sram[addr as usize % 512] = (val & 0x0f) | 0xf0,
-            Handler::Wram => bus.wram[addr as usize - 0xc000] = val,
+            Handler::Wram0 => bus.wram[addr as usize - WRAM0_START as usize] = val,
+            Handler::Wram1 => bus.wram[bus.wram_banking.translate(addr)] = val,
             Handler::IO => self.io_write(addr, val),
+
+            Handler::Mbc2Ram => bus.sram[addr as usize % 512] = (val & 0x0f) | 0xf0,
             Handler::Debug => bus.wram[addr as usize] = val,
         }
     }
@@ -275,6 +311,29 @@ impl GbEmulator {
             0xff49 => self.ppu.obp1,
             0xff4a => self.ppu.wy,
             0xff4b => self.ppu.wx,
+
+            0xff4c => {
+                if self.rom_info().is_cgb() {
+                    self.clock.sys.into_bits()
+                } else {
+                    0xff
+                }
+            }
+            0xff4d => {
+                if self.rom_info().is_cgb() {
+                    self.clock.speed.into_bits()
+                } else {
+                    0xff
+                }
+            }
+
+            0xff70 => {
+                if self.rom_info().is_cgb() {
+                    self.bus.wram_banking.value
+                } else {
+                    0xff
+                }
+            }
 
             0xffff => self.bus.inte.into_bits(),
             _ => 0, // careful: most games don't expect a 0xff from uninmplemented IO ports. 0 seems to fix it
@@ -335,9 +394,32 @@ impl GbEmulator {
             0xff49 => self.ppu.obp1 = val,
             0xff4a => self.ppu.wy = val,
             0xff4b => self.ppu.wx = val,
+
+            0xff4c => {
+                if self.rom_info().is_cgb() && self.bus.boot_sector0.is_some() {
+                    self.clock.sys = clock::Sys::from_bits_with_defaults(val)
+                }
+            }
+            0xff4d => {
+                if self.rom_info().is_cgb() {
+                    self.clock.speed.set_armed(val & 1 != 0);
+                }
+            }
+
             0xff50 => {
-                if let Some(boot) = self.bus.bios.take() {
-                    self.bus.rom[..0x100].copy_from_slice(&boot);
+                // restore boot sectors to original rom contents
+                if let Some(boot0) = self.bus.boot_sector0.take() {
+                    self.bus.rom[..0x100].copy_from_slice(&boot0);
+
+                    if let Some(boot1) = self.bus.boot_sector1.take() {
+                        self.bus.rom[0x200..0x900].copy_from_slice(&boot1);
+                    }
+                }
+            }
+
+            0xff70 => {
+                if self.rom_info().is_cgb() {
+                    self.bus.wram_banking.map((val & 0x3).max(1) as u16);
                 }
             }
 
@@ -525,6 +607,7 @@ struct Banker {
     banks_count_mask: u16,
     bank_size_mask: u16,
     bank_size_shift: u8,
+    value: u8,
     real_addr_start: u32,
 }
 
@@ -543,6 +626,7 @@ impl Banker {
         let banks_count_mask = banks_count.saturating_sub(1);
 
         let res = Self {
+            value: 0,
             banks_count_mask,
             bank_size_mask,
             bank_size_shift,
@@ -561,6 +645,7 @@ impl Banker {
         // we precompute the real index instead of keeping the bank number
         // self.real_addr_start = bank * self.bank_size;
         self.real_addr_start = (bank as u32) << self.bank_size_shift;
+        self.value = bank as u8;
     }
 
     pub fn translate(&self, addr: u16) -> usize {

@@ -30,8 +30,8 @@ impl Cart {
 pub enum ConsoleMode {
     #[default]
     DMG,
-    Compat,
-    CGB,
+    CGBCompat,
+    CGBOnly,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -66,6 +66,7 @@ pub struct RomData {
 }
 impl RomData {
     pub fn is_cgb(&self) -> bool {
+        // When using any CGB registers (including those in the Video/Link chapters), you must first unlock CGB features by changing byte 0143 in the cartridge header.
         self.mode != ConsoleMode::DMG
     }
 
@@ -81,8 +82,8 @@ impl RomData {
             .to_string();
 
         header.mode = match bytes[0x143] {
-            0x80 => ConsoleMode::Compat,
-            0xc0 => ConsoleMode::CGB,
+            0x80 => ConsoleMode::CGBCompat,
+            0xc0 => ConsoleMode::CGBOnly,
             _ => ConsoleMode::DMG,
         };
 
@@ -135,9 +136,9 @@ pub fn is_valid_rom(bytes: &[u8]) -> bool {
     bytes.len() > 0x14f && &bytes[0x104..0x104 + NINTENDO_LOGO.len()] == NINTENDO_LOGO
 }
 
-// TODO: use bios CRCs
-pub fn is_valid_bios(bios: &[u8]) -> bool {
-    bios.len() == 0x100
+// TODO: use bios CRCs for all possible bioses?
+pub fn is_valid_bios(_bios: &[u8]) -> bool {
+    true
 }
 
 const MBC_NAMES: &[(u8, &'static str)] = &[

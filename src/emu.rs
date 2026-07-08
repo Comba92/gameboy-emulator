@@ -1,5 +1,6 @@
 use crate::{
     bus::{Bus, Mbc},
+    clock::Clock,
     cpu::CpuSm83,
     dma::Dma,
     joypad::Joypad,
@@ -10,8 +11,6 @@ use crate::{
 };
 use std::{io, path::Path};
 
-pub const DMG_CLOCK_RATE: usize = 4194304;
-pub const CBG_CLOCK_RATE: usize = 2 * DMG_CLOCK_RATE;
 pub const FRAME_RATE: f32 = 59.73;
 
 pub const SCREEN_WIDTH: isize = 160;
@@ -31,6 +30,7 @@ pub struct GbEmulator {
     pub(crate) serial: Serial,
     pub(crate) timer: Timer,
     pub(crate) joy: Joypad,
+    pub(crate) clock: Clock,
 
     pub(crate) output: GbOutput,
 }
@@ -46,6 +46,7 @@ impl GbEmulator {
             serial: Serial::new(),
             dma: Dma::new(),
             joy: Joypad::new(),
+            clock: Clock::new(),
             output: GbOutput::default(),
         }
     }
@@ -64,7 +65,7 @@ impl GbEmulator {
         let cpu = if bios.is_some() {
             CpuSm83::default()
         } else {
-            CpuSm83::new_bootless()
+            CpuSm83::new_bootless_dmg()
         };
 
         let mut bus = Bus::new(game, bios);
@@ -79,6 +80,7 @@ impl GbEmulator {
             serial: Serial::new(),
             dma: Dma::new(),
             joy: Joypad::new(),
+            clock: Clock::new(),
             output: GbOutput::default(),
         })
     }
@@ -93,10 +95,6 @@ impl GbEmulator {
 
     pub const fn rom_info(&self) -> &RomData {
         &self.bus.header
-    }
-
-    pub const fn clock_rate(&self) -> usize {
-        DMG_CLOCK_RATE
     }
 
     pub fn step(&mut self) {

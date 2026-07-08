@@ -191,6 +191,7 @@ impl GbEmulator {
             ppu.stat.set_mode(Mode::HBlank);
             ppu.stat.set_lyc_eq_ly(false);
 
+            ppu.pixel_idx = 0;
             ppu.dot = 0;
             ppu.ly = 0;
             ppu.ly_read = 0;
@@ -442,10 +443,7 @@ impl GbEmulator {
         }
 
         let ppu = &mut self.ppu;
-        if ppu.bg_fifo.len() > 8
-            && ppu.fetch_fine_x >= 0
-            && matches!(ppu.obj_fetch, ObjFetcherState::Idle)
-        {
+        if ppu.bg_fifo.len() > 8 && matches!(ppu.obj_fetch, ObjFetcherState::Idle) {
             let bg_pixel = ppu.bg_fifo.pop_front().unwrap();
             let obj_pixel = ppu.obj_fifo.pop_front().unwrap_or(0.into());
 

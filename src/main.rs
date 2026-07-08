@@ -51,7 +51,7 @@ fn main() {
 
     println!("Current dir: {:?}", std::env::current_dir());
 
-    let mut bios_path = PathBuf::from("utils/bootix_dmg.bin");
+    let mut bios_path = PathBuf::from("utils/cgb_boot.bin");
     let mut rom_path = PathBuf::from("../roms/dmg-acid2.gb");
 
     // let emu = GbEmulator::load_bios_only(Some(bios)).unwrap();
