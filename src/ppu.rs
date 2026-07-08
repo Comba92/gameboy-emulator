@@ -245,7 +245,7 @@ impl GbEmulator {
 
         let offset = (y + x) % 1024;
 
-        let tile_id = self.dispatch_read(tilemap | offset);
+        let tile_id = self.bus.vram_direct_read(tilemap | offset);
 
         let ppu = &mut self.ppu;
         let offset = if ppu.wnd_rendering {
@@ -264,8 +264,8 @@ impl GbEmulator {
         };
         let tile_addr = tile_start | offset;
 
-        let tile_lo = self.dispatch_read(tile_addr);
-        let tile_hi = self.dispatch_read(tile_addr + 1);
+        let tile_lo = self.bus.vram_direct_read(tile_addr);
+        let tile_hi = self.bus.vram_direct_read(tile_addr + 1);
         (tile_lo, tile_hi)
     }
 
@@ -289,8 +289,8 @@ impl GbEmulator {
         let tile_addr = tile_start | offset;
         let flip_x = obj.attr.flip_x();
 
-        let mut tile_lo = self.dispatch_read(tile_addr);
-        let mut tile_hi = self.dispatch_read(tile_addr + 1);
+        let mut tile_lo = self.bus.vram_direct_read(tile_addr);
+        let mut tile_hi = self.bus.vram_direct_read(tile_addr + 1);
 
         if !flip_x {
             tile_lo = tile_lo.reverse_bits();

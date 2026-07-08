@@ -78,7 +78,7 @@ fn cpu_from_mock(emu: &mut GbEmulator, mock: &CpuTestState) {
     cpu.hl.set_lo(mock.l);
 
     for (addr, val) in &mock.ram {
-        emu.dispatch_write(*addr, *val);
+        emu.cpu_write(*addr, *val);
     }
 
     emu.debug.clear();
@@ -147,7 +147,7 @@ fn cpu_test(emu: &mut GbEmulator, test: &CpuTest) -> bool {
 
     // clear ram written
     for (addr, _) in &test.end.ram {
-        emu.dispatch_write(*addr, 0);
+        emu.cpu_write(*addr, 0);
     }
 
     emu.cpu = CpuSm83::default();

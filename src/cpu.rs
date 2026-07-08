@@ -32,7 +32,6 @@ pub struct CpuSm83 {
     pub ime: bool,
     pub ei: bool,
     pub halted: bool,
-    pub(crate) halt_bug: bool,
 
     pub mcycles: usize,
 }
@@ -59,24 +58,12 @@ impl CpuSm83 {
 impl GbEmulator {
     pub fn cpu_step(&mut self) {
         self.handle_interrupts();
-
-        // if last instruction was ei, we poll interrupts, and only then set ime
-        if self.cpu.ei {
-            self.cpu.ime = true;
-            self.cpu.ei = false;
-        }
         if self.cpu.halted {
             self.tick();
             return;
         }
 
-        let opcode = if self.cpu.halt_bug {
-            self.cpu.halt_bug = false;
-            self.read8(self.cpu.pc)
-        } else {
-            self.pc_fetch()
-        };
-
+        let opcode = self.pc_fetch();
         self.decode_n_execute(opcode);
     }
 
@@ -85,29 +72,31 @@ impl GbEmulator {
         let intf = self.bus.intf.into_bits();
         let ints = (inte & intf) & 0x1f;
 
-        if !self.cpu.ime {
+        if self.cpu.ime {
+            let intr = ints.trailing_zeros();
+
+            if intr < 5 {
+                // we onl have 5 kinds of interrupts!
+                self.cpu.halted = false;
+                self.cpu.ime = false;
+                self.bus.intf.set_bit(intr, false);
+
+                self.tick();
+                self.tick();
+                self.stack_push(self.cpu.pc);
+                self.cpu.pc = 0x40 | (intr << 3) as u16;
+                self.tick();
+            }
+        } else if ints > 0 {
             // If IME is not set, there are two distinct cases, depending on whether an interrupt is pending as the halt instruction is first executed.
             // If no interrupt is pending, halt executes as normal, and the CPU resumes regular execution as soon as an interrupt becomes pending. However, since IME=0, the interrupt is not handled.
-            if ints > 0 {
-                self.cpu.halted = false;
-            }
-
-            return;
+            self.cpu.halted = false;
         }
 
-        let intr = ints.trailing_zeros();
-
-        if intr < 5 {
-            // we onl have 5 kinds of interrupts!
-            self.cpu.halted = false;
-            self.cpu.ime = false;
-            self.bus.intf.set_bit(intr, false);
-
-            self.tick();
-            self.tick();
-            self.stack_push(self.cpu.pc);
-            self.cpu.pc = 0x40 | (intr << 3) as u16;
-            self.tick();
+        // if last instruction was ei, we poll interrupts, and only then set ime
+        if self.cpu.ei {
+            self.cpu.ime = true;
+            self.cpu.ei = false;
         }
     }
 
@@ -824,7 +813,9 @@ impl GbEmulator {
         if !self.cpu.ime && ints > 0 {
             // If an interrupt is pending, halt immediately exits, as expected, however the “halt bug” is triggered.
             // https://gbdev.io/pandocs/halt.html#halt-bug
-            self.cpu.halt_bug = true;
+            self.handle_interrupts();
+            let opcode = self.read8(self.cpu.pc);
+            self.decode_n_execute(opcode);
         } else {
             self.cpu.halted = true;
         }

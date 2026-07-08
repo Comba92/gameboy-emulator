@@ -107,8 +107,8 @@ mod dma {
 
         pub fn write(&mut self, val: u8) {
             self.init_cycle = true;
-            self.start = val;
-            self.addr = Some((val as u16) << 8);
+            self.start = val % 0xe0;
+            self.addr = Some((val as u16 % 0xe0) << 8);
         }
     }
 }
@@ -253,6 +253,7 @@ impl GbEmulator {
 
     pub(crate) fn dma_step(&mut self) {
         let dma = &mut self.dma;
+        // TODO: should block whole bus both for CPU and PPU
 
         if let Some(addr) = dma.addr {
             if dma.init_cycle {
@@ -263,9 +264,9 @@ impl GbEmulator {
 
             let val = self.dispatch_read(addr);
             let offset = addr & 0x00ff;
-            self.dispatch_write(0xfe00 | offset, val);
+            self.bus.oam_direct_write(0xfe00 | offset, val);
 
-            if offset == 255 {
+            if offset == self.bus.oam.len() as u16 - 1 {
                 self.dma.addr = None;
                 self.dma.start = 0xff;
             } else {

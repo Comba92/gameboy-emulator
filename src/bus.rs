@@ -1,5 +1,8 @@
 use crate::{
-    emu::GbEmulator, rom::{Cart, RomData}, serial, timer
+    emu::GbEmulator,
+    ppu,
+    rom::{Cart, RomData},
+    serial, timer,
 };
 use bitfields::bitfield;
 
@@ -16,18 +19,18 @@ pub const SRAM_BANK_SIZE: u16 = 8 * 1024;
 pub const WRAM_BANK_SIZE: u16 = 4 * 1024;
 
 #[derive(Clone, Copy)]
-enum Handler {
+pub(crate) enum Handler {
     Rom0,
     Rom1,
-    // Mbc6Flash,
     Vram, // Video RAM
     Sram, // Cartridge RAM
     SramReadOnly,
-    Mbc2Ram,
-    // Mbc6Ram,
     Wram, // Work RAM
     IO,
     OpenBus,
+    Mbc2Ram,
+    // Mbc6Flash,
+    // Mbc6Ram,
     Debug,
 }
 
@@ -155,6 +158,18 @@ impl Bus {
         self.map[0xa] = handler;
         self.map[0xb] = handler;
     }
+
+    pub fn vram_direct_read(&self, addr: u16) -> u8 {
+        self.vram[addr as usize - 0x8000]
+    }
+
+    pub fn oam_direct_read(&self, addr: u16) -> u8 {
+        self.oam[addr as usize - 0xfe00]
+    }
+
+    pub fn oam_direct_write(&mut self, addr: u16, val: u8) {
+        self.oam[addr as usize - 0xfe00] = val;
+    }
 }
 
 impl GbEmulator {
@@ -185,11 +200,11 @@ impl GbEmulator {
             Handler::OpenBus => 0xff,
 
             Handler::Vram => {
-                // if self.ppu.stat.mode() != ppu::Mode::Drawing {
-                bus.vram[addr as usize - 0x8000]
-                // } else {
-                // 0xff
-                // }
+                if self.ppu.stat.mode() != ppu::Mode::Drawing {
+                    self.bus.vram_direct_read(addr)
+                } else {
+                    0xff
+                }
             }
             Handler::Sram | Handler::SramReadOnly => bus.sram[bus.sram_banking.translate(addr)],
             Handler::Mbc2Ram => bus.sram[addr as usize % 512],
@@ -210,9 +225,9 @@ impl GbEmulator {
             Handler::OpenBus | Handler::SramReadOnly => {}
 
             Handler::Vram => {
-                // if self.ppu.stat.mode() != ppu::Mode::Drawing {
-                bus.vram[addr as usize - 0x8000] = val
-                // }
+                if self.ppu.stat.mode() != ppu::Mode::Drawing {
+                    bus.vram[addr as usize - 0x8000] = val
+                }
             }
             Handler::Sram => bus.sram[bus.sram_banking.translate(addr)] = val,
             Handler::Mbc2Ram => bus.sram[addr as usize % 512] = val & 0x0f,
@@ -223,12 +238,13 @@ impl GbEmulator {
     }
 
     fn io_read(&mut self, addr: u16) -> u8 {
-        if addr <= 0xfdff {
-            // echo ram
-            return 0xff;
-        } else if addr <= 0xfe9f {
+        if 0xfe00 <= addr && addr <= 0xfe9f {
             // OAM
-            return self.bus.oam[addr as usize - 0xfe00];
+            return if self.ppu.stat.mode().into_bits() < 2 {
+                self.bus.oam_direct_read(addr)
+            } else {
+                0xff
+            };
         } else if 0xff80 <= addr && addr <= 0xfffe {
             // HRAM
             return self.bus.hram[addr as usize - 0xff80];
@@ -264,12 +280,16 @@ impl GbEmulator {
     }
 
     fn io_write(&mut self, addr: u16, val: u8) {
-        if addr >= 0xfe00 && addr <= 0xfe9f {
+        if 0xfe00 <= addr && addr <= 0xfe9f {
             // OAM
-            self.bus.oam[addr as usize - 0xfe00] = val;
+            if self.ppu.stat.mode().into_bits() < 2 {
+                self.bus.oam[addr as usize - 0xfe00] = val;
+            }
+            return;
         } else if 0xff80 <= addr && addr <= 0xfffe {
             // HRAM
             self.bus.hram[addr as usize - 0xff80] = val;
+            return;
         }
 
         match addr {
@@ -332,10 +352,10 @@ impl GbEmulator {
             Mbc::None => {}
             Mbc::Mbc1(m) => {
                 match addr {
-                    0x0000 .. 0x2000 => self.bus.sram_enable(val & 0xf == 0xa),
-                    0x2000 .. 0x4000 => m.rom_bank = (val & 0x1f).max(1),
-                    0x4000 .. 0x6000 => m.ram_bank = val & 0x3,
-                    0x6000 .. 0x8000 => m.mode = val & 1 != 0,
+                    0x0000..0x2000 => self.bus.sram_enable(val & 0xf == 0xa),
+                    0x2000..0x4000 => m.rom_bank = (val & 0x1f).max(1),
+                    0x4000..0x6000 => m.ram_bank = val & 0x3,
+                    0x6000..0x8000 => m.mode = val & 1 != 0,
                     _ => {}
                 }
 
@@ -343,7 +363,9 @@ impl GbEmulator {
             }
 
             Mbc::Mbc2 => {
-                if addr >= 0x4000 { return; }
+                if addr >= 0x4000 {
+                    return;
+                }
                 if addr & 0x80 == 0 {
                     if val & 0xf == 0xa {
                         self.bus.sram_set(Handler::Mbc2Ram);
@@ -358,87 +380,85 @@ impl GbEmulator {
 
             Mbc::Mbc3(m) => {
                 match addr {
-                    0x0000 .. 0x2000 => {
+                    0x0000..0x2000 => {
                         self.bus.sram_enable(val & 0xf == 0xa);
                         m.timer_enable = val & 0xf == 0xa;
                     }
-                    0x2000 .. 0x4000 => self.bus.rom1_banking.map(val.max(1) as u16),
-                    0x4000 .. 0x6000 => {
+                    0x2000..0x4000 => self.bus.rom1_banking.map(val.max(1) as u16),
+                    0x4000..0x6000 => {
                         self.bus.sram_banking.map(val as u16);
                         m.timer_reg = val;
                     }
-                    0x6000 .. 0x8000 => {} // TODO: Latch Clock
-                    0xa000 .. 0xc000 => {} // TODO: RTC
+                    0x6000..0x8000 => {} // TODO: Latch Clock
+                    0xa000..0xc000 => {} // TODO: RTC
                     _ => {}
                 }
             }
 
-            Mbc::Mbc5(m) => {
-                match addr {
-                    0x0000 .. 0x2000 => self.bus.sram_enable(val & 0xf == 0xa),
-                    0x2000 .. 0x3000 => {
-                        m.rom_bank = (m.rom_bank & 0xff00) | (val as u16);
-                        self.bus.rom1_banking.map(m.rom_bank);
-                    }
-                    0x3000 .. 0x4000 => {
-                        m.rom_bank = (m.rom_bank & 0x00ff) | ((val as u16 & 1) << 8);
-                        self.bus.rom1_banking.map(m.rom_bank);
-                    }
-                    0x4000 .. 0x6000 => {
-                        self.bus.sram_banking.map(val as u16);
-                        m.rumble_enable = val & 0x08 != 0;
-                    }
-                    _ => {}
+            Mbc::Mbc5(m) => match addr {
+                0x0000..0x2000 => self.bus.sram_enable(val & 0xf == 0xa),
+                0x2000..0x3000 => {
+                    m.rom_bank = (m.rom_bank & 0xff00) | (val as u16);
+                    self.bus.rom1_banking.map(m.rom_bank);
                 }
-            }
+                0x3000..0x4000 => {
+                    m.rom_bank = (m.rom_bank & 0x00ff) | ((val as u16 & 1) << 8);
+                    self.bus.rom1_banking.map(m.rom_bank);
+                }
+                0x4000..0x6000 => {
+                    self.bus.sram_banking.map(val as u16);
+                    m.rumble_enable = val & 0x08 != 0;
+                }
+                _ => {}
+            },
 
             Mbc::Mbc6 => {
                 match addr {
-                    0x0000 .. 0x0400 => self.bus.sram_enable(val & 0xf == 0xa),
-                    0x0400 .. 0x800 => {
+                    0x0000..0x0400 => self.bus.sram_enable(val & 0xf == 0xa),
+                    0x0400..0x800 => {
                         // ram A
                     }
-                    0x0800 .. 0x0c00 => {
+                    0x0800..0x0c00 => {
                         // ram B
                     }
-                    0x0c00 .. 0x1000 => {
+                    0x0c00..0x1000 => {
                         // flash enable
                     }
                     0x1000 => {
                         // flash write enable
                     }
 
-                    0x2000 .. 0x2800 => {
+                    0x2000..0x2800 => {
                         // flash A number
                     }
-                    0x2800 .. 0x3000 => {
+                    0x2800..0x3000 => {
                         // flash A select
                     }
 
-                    0x3000 .. 0x3800 => {
+                    0x3000..0x3800 => {
                         // flash B number
                     }
-                    0x3800 .. 0x4000 => {
+                    0x3800..0x4000 => {
                         // flash B select
                     }
 
                     _ => {}
                 }
-            },
+            }
 
             Mbc::Mbc7(m) => {
                 match addr {
-                    0x0000 .. 0x2000 => {
+                    0x0000..0x2000 => {
                         m.ram_enable0 = val & 0x0f == 0x0a;
                         self.bus.sram_enable(m.ram_enable0 && m.ram_enable1);
                     }
-                    0x2000 .. 0x4000 => self.bus.rom1_banking.map(val as u16),
-                    0x4000 .. 0x6000 => {
+                    0x2000..0x4000 => self.bus.rom1_banking.map(val as u16),
+                    0x4000..0x6000 => {
                         m.ram_enable1 = val == 40;
                         self.bus.sram_enable(m.ram_enable0 && m.ram_enable1);
                     }
 
-                    0xa000 .. 0xb000 => {
+                    0xa000..0xb000 => {
                         // TODO: accel and eeprom
                     }
                     _ => {}
@@ -448,14 +468,16 @@ impl GbEmulator {
             Mbc::Mmm01 => todo!(),
 
             Mbc::M161(bankswitched) => {
-                if addr >= 0x8000 || *bankswitched { return; }
+                if addr >= 0x8000 || *bankswitched {
+                    return;
+                }
                 self.bus.rom1_banking.map(val as u16);
                 *bankswitched = true;
             }
 
             Mbc::HuC1 => {
                 match addr {
-                    0x0000 .. 0x2000 => {
+                    0x0000..0x2000 => {
                         if val == 0xe {
                             // TODO: IR enable
                             self.bus.sram_enable(false);
@@ -463,9 +485,9 @@ impl GbEmulator {
                             self.bus.sram_enable(true);
                         }
                     }
-                    0x2000 .. 0x4000 => self.bus.rom1_banking.map(val as u16),
-                    0x4000 .. 0x6000 => self.bus.sram_banking.map(val as u16),
-                    0xa000 .. 0xc000 => {
+                    0x2000..0x4000 => self.bus.rom1_banking.map(val as u16),
+                    0x4000..0x6000 => self.bus.sram_banking.map(val as u16),
+                    0xa000..0xc000 => {
                         // TODO: IR mode
                     }
                     _ => {}
@@ -474,7 +496,7 @@ impl GbEmulator {
 
             Mbc::HuC3 => {
                 match addr {
-                    0x0000 .. 0x2000 => {
+                    0x0000..0x2000 => {
                         match val {
                             0x0 => self.bus.sram_set(Handler::SramReadOnly),
                             0xa => self.bus.sram_set(Handler::Sram),
@@ -483,9 +505,9 @@ impl GbEmulator {
                         }
                     }
 
-                    0x2000 .. 0x4000 => self.bus.rom1_banking.map(val as u16),
-                    0x4000 .. 0x6000 => self.bus.sram_banking.map(val as u16),
-                    0xa000 .. 0xc000 => {
+                    0x2000..0x4000 => self.bus.rom1_banking.map(val as u16),
+                    0x4000..0x6000 => self.bus.sram_banking.map(val as u16),
+                    0xa000..0xc000 => {
                         // RTC or IR mode
                     }
                     _ => {}
@@ -572,8 +594,8 @@ impl Mbc {
 
                 Mbc::Mbc2
             }
-            0x0f ..= 0x13 => Mbc::Mbc3(Mbc3::default()),
-            0x19 ..= 0x1e => Mbc::Mbc5(Mbc5::default()),
+            0x0f..=0x13 => Mbc::Mbc3(Mbc3::default()),
+            0x19..=0x1e => Mbc::Mbc5(Mbc5::default()),
 
             // 0x0b | 0x0c | 0x0d => {
             //     if false {
@@ -618,7 +640,8 @@ pub(crate) struct Mbc1 {
 impl Mbc1 {
     pub fn new(bus: &mut Bus) -> Self {
         // TODO: detect MBC1M
-        let kind = if bus.header.rom_size >= 1024 * 1024 { // if its over 1 MiB
+        let kind = if bus.header.rom_size >= 1024 * 1024 {
+            // if its over 1 MiB
             Mbc1Kind::BigRom
         } else {
             Mbc1Kind::SmallRom
@@ -646,7 +669,8 @@ impl Mbc1 {
                     bus.rom0_banking.map(0);
                 }
 
-                bus.rom1_banking.map(((self.ram_bank << 5) | self.rom_bank) as u16);
+                bus.rom1_banking
+                    .map(((self.ram_bank << 5) | self.rom_bank) as u16);
                 // big carts only have 8KiB ram, sram can't be changed
             }
 
@@ -657,7 +681,8 @@ impl Mbc1 {
                     bus.rom0_banking.map(0);
                 }
 
-                bus.rom1_banking.map(((self.ram_bank << 4) | (self.rom_bank & 0x0f)) as u16);
+                bus.rom1_banking
+                    .map(((self.ram_bank << 4) | (self.rom_bank & 0x0f)) as u16);
             }
         }
     }
