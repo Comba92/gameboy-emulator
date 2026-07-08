@@ -1,7 +1,7 @@
 use crate::{
     emu::GbEmulator,
     ppu,
-    rom::{Cart, RomData},
+    rom::{self, Cart, RomData},
     serial, timer,
 };
 use bitfields::bitfield;
@@ -13,10 +13,10 @@ pub const SRAM_START: u16 = 0xa000;
 pub const WRAM0_START: u16 = 0xc000;
 pub const WRAM1_START: u16 = 0xd000;
 
-pub const ROM_BANK_SIZE: u16 = 16 * 1024;
-pub const VRAM_BANK_SIZE: u16 = 8 * 1024;
-pub const SRAM_BANK_SIZE: u16 = 8 * 1024;
-pub const WRAM_BANK_SIZE: u16 = 4 * 1024;
+pub const ROM_BANK_SIZE: usize = 16 * 1024;
+pub const VRAM_BANK_SIZE: usize = 8 * 1024;
+pub const SRAM_BANK_SIZE: usize = 8 * 1024;
+pub const WRAM_BANK_SIZE: usize = 4 * 1024;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Handler {
@@ -147,7 +147,7 @@ impl Bus {
     }
 
     pub fn sram_enable(&mut self, cond: bool) {
-        if cond && self.header.ram_size > 0 {
+        if cond {
             self.sram_set(Handler::Sram);
         } else {
             self.sram_set(Handler::OpenBus);
@@ -232,7 +232,7 @@ impl GbEmulator {
                 }
             }
             Handler::Sram => bus.sram[bus.sram_banking.translate(addr)] = val,
-            Handler::Mbc2Ram => bus.sram[addr as usize % 512] = val & 0x0f,
+            Handler::Mbc2Ram => bus.sram[addr as usize % 512] = (val & 0x0f) | 0xf0,
             Handler::Wram => bus.wram[addr as usize - 0xc000] = val,
             Handler::IO => self.io_write(addr, val),
             Handler::Debug => bus.wram[addr as usize] = val,
@@ -354,7 +354,7 @@ impl GbEmulator {
             Mbc::None => {}
             Mbc::Mbc1(m) => {
                 match addr {
-                    0x0000..0x2000 => self.bus.sram_enable(val & 0xf == 0xa),
+                    0x0000..0x2000 => self.bus.sram_enable(val & 0x0f == 0x0a),
                     0x2000..0x4000 => m.rom_bank = (val & 0x1f).max(1),
                     0x4000..0x6000 => m.ram_bank = val & 0x3,
                     0x6000..0x8000 => m.mode = val & 1 != 0,
@@ -368,8 +368,9 @@ impl GbEmulator {
                 if addr >= 0x4000 {
                     return;
                 }
-                if addr & 0x80 == 0 {
-                    if val & 0xf == 0xa {
+
+                if addr & 0x100 == 0 {
+                    if val & 0x0f == 0x0a {
                         self.bus.sram_set(Handler::Mbc2Ram);
                     } else {
                         self.bus.sram_set(Handler::OpenBus);
@@ -528,15 +529,15 @@ struct Banker {
 }
 
 impl Banker {
-    pub fn new(virt_size: u16, real_size: usize) -> Self {
+    pub fn new(virt_size: usize, real_size: usize) -> Self {
         // https://stackoverflow.com/questions/25787613/division-and-multiplication-by-power-of-2
         let bank_size_shift = virt_size.ilog2() as u8;
         // TODO: this doesn't work if bankSize is odd!
-        let bank_size_mask = virt_size.saturating_sub(1);
+        let bank_size_mask = virt_size.saturating_sub(1) as u16;
 
         // TODO: if realSize < virtSize and there banks arent big enough, this becomes 0!!
         // TODO: handle unconvetional realSizes (less tha 8KiB)
-        let banks_count = (real_size / virt_size as usize) as u16;
+        let banks_count = (real_size / virt_size) as u16;
         // TODO: this doesn't work if banksCount is odd! (shouldnt happen as it
         // depends on realSize, and it should always be power of two)
         let banks_count_mask = banks_count.saturating_sub(1);
@@ -590,10 +591,8 @@ impl Mbc {
             0x00 | 0x08 | 0x09 => Mbc::None,
             0x01 | 0x02 | 0x03 => Mbc::Mbc1(Mbc1::new(bus)),
             0x05 | 0x06 => {
-                bus.map[0xa] = Handler::Mbc2Ram;
-                bus.map[0xb] = Handler::Mbc2Ram;
+                bus.header.ram_size = 512;
                 bus.sram = vec![0x0f; 512].into_boxed_slice();
-
                 Mbc::Mbc2
             }
             0x0f..=0x13 => Mbc::Mbc3(Mbc3::default()),
@@ -625,67 +624,52 @@ impl Mbc {
 }
 
 #[derive(Default)]
-enum Mbc1Kind {
-    #[default]
-    SmallRom,
-    BigRom,
-    MultiCart,
-}
-
-#[derive(Default)]
 pub(crate) struct Mbc1 {
-    kind: Mbc1Kind,
+    is_multicart: bool,
     mode: bool,
     rom_bank: u8,
     ram_bank: u8,
 }
 impl Mbc1 {
     pub fn new(bus: &mut Bus) -> Self {
-        // TODO: detect MBC1M
-        let kind = if bus.header.rom_size >= 1024 * 1024 {
-            // if its over 1 MiB
-            Mbc1Kind::BigRom
+        // detect MBC1M: it has a nintendo logo at bank 0x10
+        let bank10_start = ROM_BANK_SIZE * 0x10;
+        let logo_start = bank10_start + 0x104;
+        let logo_end = logo_start + rom::NINTENDO_LOGO.len();
+        let is_multicart = if logo_end >= bus.rom.len() {
+            false
         } else {
-            Mbc1Kind::SmallRom
+            let nintendo_logo = &bus.rom[logo_start..logo_end];
+            nintendo_logo == rom::NINTENDO_LOGO
         };
 
         Self {
-            kind,
+            is_multicart,
             ..Default::default()
         }
     }
 
     pub fn update(&self, bus: &mut Bus) {
-        // only big carts care about mode
-        match self.kind {
-            Mbc1Kind::SmallRom => {
-                // rom0 can't be changed
-                bus.rom1_banking.map(self.rom_bank as u16);
+        if self.is_multicart {
+            if self.mode {
+                bus.rom0_banking.map((self.ram_bank as u16) << 4);
+            } else {
+                bus.rom0_banking.map(0);
+            }
+
+            bus.rom1_banking
+                .map(((self.ram_bank << 4) | (self.rom_bank & 0x0f)) as u16);
+        } else {
+            if self.mode {
+                bus.rom0_banking.map((self.ram_bank as u16) << 5);
                 bus.sram_banking.map(self.ram_bank as u16);
+            } else {
+                bus.rom0_banking.map(0);
+                bus.sram_banking.map(0);
             }
 
-            Mbc1Kind::BigRom => {
-                if self.mode {
-                    bus.rom0_banking.map((self.ram_bank as u16) << 5);
-                } else {
-                    bus.rom0_banking.map(0);
-                }
-
-                bus.rom1_banking
-                    .map(((self.ram_bank << 5) | self.rom_bank) as u16);
-                // big carts only have 8KiB ram, sram can't be changed
-            }
-
-            Mbc1Kind::MultiCart => {
-                if self.mode {
-                    bus.rom0_banking.map((self.ram_bank as u16) << 4);
-                } else {
-                    bus.rom0_banking.map(0);
-                }
-
-                bus.rom1_banking
-                    .map(((self.ram_bank << 4) | (self.rom_bank & 0x0f)) as u16);
-            }
+            bus.rom1_banking
+                .map(((self.ram_bank << 5) | self.rom_bank) as u16);
         }
     }
 }
