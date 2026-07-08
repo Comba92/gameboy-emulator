@@ -32,6 +32,7 @@ pub struct CpuSm83 {
     pub ime: bool,
     pub ei: bool,
     pub halted: bool,
+    pub(crate) halt_bug: bool,
 
     pub mcycles: usize,
 }
@@ -69,12 +70,20 @@ impl GbEmulator {
             return;
         }
 
-        let opcode = self.pc_fetch();
+        let opcode = if self.cpu.halt_bug {
+            self.cpu.halt_bug = false;
+            self.read8(self.cpu.pc)
+        } else {
+            self.pc_fetch()
+        };
+
         self.decode_n_execute(opcode);
     }
 
     pub fn handle_interrupts(&mut self) {
-        let ints = self.bus.inte.into_bits() & self.bus.intf.into_bits();
+        let inte = self.bus.inte.into_bits();
+        let intf = self.bus.intf.into_bits();
+        let ints = (inte & intf) & 0x1f;
 
         if !self.cpu.ime {
             // If IME is not set, there are two distinct cases, depending on whether an interrupt is pending as the halt instruction is first executed.
@@ -142,41 +151,6 @@ impl GbEmulator {
     fn set_z(&mut self, val: u8) {
         self.cpu.f.set_zero(val == 0);
     }
-
-    // fn handle_interrupts(&mut self) {
-    //     let inte = self.inte.into_bits();
-    //     let intf = self.intf.into_bits();
-
-    //     if !self.cpu.ime {
-    //         // If IME is not set, there are two distinct cases, depending on whether an interrupt is pending as the halt instruction is first executed.
-    //         // If no interrupt is pending, halt executes as normal, and the CPU resumes regular execution as soon as an interrupt becomes pending. However, since IME=0, the interrupt is not handled.
-    //         if inte & intf & 0x1f > 0 {
-    //             self.cpu.halted = false;
-    //         }
-
-    //         return;
-    //     }
-
-    //     for bit in 0..5 {
-    //         let mask = 1 << bit;
-    //         if inte & intf & mask > 0 {
-    //             // Most commonly, IME is set. In this case, the CPU simply wakes up, and before executing the instruction after the halt, the interrupt handler is called normally.
-    //             self.cpu.halted = false;
-    //             self.cpu.ime = false;
-    //             self.intf.set_bits(intf & !mask);
-
-    //             // we can easily get the ISR (0x40, 048, 0x50, 0x58, 0x60) like this
-    //             let isr = 0x40 | (bit << 3);
-
-    //             // Two wait states are executed (2 M-cycles pass while nothing happens; presumably the CPU is executing nops during this time).
-    //             self.tick();
-    //             self.tick();
-
-    //             self.rst(isr);
-    //             break;
-    //         }
-    //     }
-    // }
 
     fn read8(&mut self, addr: u16) -> u8 {
         self.tick();
@@ -842,23 +816,18 @@ impl GbEmulator {
     }
 
     fn halt(&mut self) {
-        self.cpu.halted = true;
+        let inte = self.bus.inte.into_bits();
+        let intf = self.bus.intf.into_bits();
+        let ints = (inte & intf) & 0x1f;
 
-        // let inte = self.bus.inte.into_bits();
-        // let intf = self.bus.intf.into_bits();
-
-        // // If IME is not set, there are two distinct cases, depending on whether an interrupt is pending as the halt instruction is first executed.
-        // if !self.cpu.ime && (inte & intf & 0x1f) > 0 {
-        //     // If an interrupt is pending, halt immediately exits, as expected, however the “halt bug” is triggered.
-        //     // https://gbdev.io/pandocs/halt.html#halt-bug
-
-        //     // read without increasing pc
-        //     let opcode = self.read8(self.cpu.pc);
-        //     self.decode_n_execute(opcode);
-        // } else {
-        //     self.cpu.halted = true;
-        // }
-        // TODO
+        // If IME is not set, there are two distinct cases, depending on whether an interrupt is pending as the halt instruction is first executed.
+        if !self.cpu.ime && ints > 0 {
+            // If an interrupt is pending, halt immediately exits, as expected, however the “halt bug” is triggered.
+            // https://gbdev.io/pandocs/halt.html#halt-bug
+            self.cpu.halt_bug = true;
+        } else {
+            self.cpu.halted = true;
+        }
     }
 }
 

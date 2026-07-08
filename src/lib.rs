@@ -1,5 +1,3 @@
-use sdl2::libc::clock;
-
 use crate::emu::GbEmulator;
 
 mod bus;
@@ -24,7 +22,7 @@ mod timer {
     pub struct Ctrl {
         #[bits(2)]
         clock_select: Mode,
-        tac_enable: bool,
+        tima_enabled: bool,
 
         #[bits(5, default = 0x1f)]
         _unused: u8,
@@ -221,13 +219,15 @@ impl GbEmulator {
         if timer.tima_counter >= tima_clock_target {
             timer.tima_counter -= tima_clock_target;
 
-            let (tima, ovfl) = timer.tima.overflowing_add(1);
-            self.timer.tima = if ovfl {
-                self.bus.intf.set_timer(true);
-                self.timer.tma
-            } else {
-                tima
-            };
+            if timer.tac.tima_enabled() {
+                let (tima, ovfl) = timer.tima.overflowing_add(1);
+                self.timer.tima = if ovfl {
+                    self.bus.intf.set_timer(true);
+                    self.timer.tma
+                } else {
+                    tima
+                };
+            }
         }
     }
 

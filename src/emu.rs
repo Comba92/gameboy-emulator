@@ -67,12 +67,14 @@ impl GbEmulator {
             CpuSm83::new_bootless()
         };
 
-        Ok(Self {
-            mbc: Mbc::new(&game.header)?,
+        let mut bus = Bus::new(game, bios);
+        let mbc = Mbc::new(&mut bus)?;
 
+        Ok(Self {
             cpu,
+            bus,
+            mbc,
             ppu: Ppu::new(),
-            bus: Bus::new(game, bios),
             timer: Timer::new(),
             serial: Serial::new(),
             dma: Dma::new(),
@@ -292,8 +294,6 @@ impl<'a> GbBuilder<'a> {
 
     pub fn build(self) -> Result<GbEmulator, LoadError> {
         // games might be zipped!
-        println!("ROM OK: {}", self.rom.is_some());
-        println!("BIOS OK: {}", self.bios.is_some());
 
         let game = if let Some(rom) = self.rom {
             let res = match rom {

@@ -314,6 +314,7 @@ impl GbEmulator {
             // a 6-dot penalty is incurred while the BG fetcher is being set up for the window.
             ppu.fetch_coarse_x = 0;
             ppu.bg_fetch = BgFetcherState::start(ppu.scx, ppu.scy);
+            ppu.fetch_scrolled = None;
             ppu.bg_fifo.clear();
 
             ppu.wnd_rendering = true;
