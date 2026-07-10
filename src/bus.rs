@@ -1,5 +1,4 @@
 use crate::{
-    clock,
     emu::GbEmulator,
     ppu,
     rom::{self, Cart, RomData},
@@ -9,10 +8,15 @@ use bitfields::bitfield;
 
 pub const ROM0_START: u16 = 0x0000;
 pub const ROM1_START: u16 = 0x4000;
+pub const ROM_END: u16 = VRAM_START;
 pub const VRAM_START: u16 = 0x8000;
+pub const VRAM_END: u16 = SRAM_START;
 pub const SRAM_START: u16 = 0xa000;
+pub const SRAM_END: u16 = WRAM0_START;
 pub const WRAM0_START: u16 = 0xc000;
 pub const WRAM1_START: u16 = 0xd000;
+pub const WRAM_END: u16 = IO_START;
+pub const IO_START: u16 = 0xe000;
 
 pub const ROM_BANK_SIZE: usize = 16 * 1024;
 pub const VRAM_BANK_SIZE: usize = 8 * 1024;
@@ -29,6 +33,7 @@ pub(crate) enum Handler {
     Wram0,
     Wram1,
     IO,
+    HramOnly,
     OpenBus,
     Mbc2Ram,
     // Mbc6Flash,
@@ -68,8 +73,8 @@ pub(crate) struct IntFlags {
 
 pub(crate) struct Bus {
     rom: Box<[u8]>,
-    boot_sector0: Option<Box<[u8]>>,
-    boot_sector1: Option<Box<[u8]>>,
+    pub boot_sector0: Option<Box<[u8]>>,
+    pub boot_sector1: Option<Box<[u8]>>,
     pub header: RomData,
 
     pub intf: IntFlags,
@@ -89,7 +94,9 @@ pub(crate) struct Bus {
     vram_banking: Banker,
     vram_bank_select: u8,
 
-    map: [Handler; 16],
+    pub(crate) map: [Handler; 16],
+    pub(crate) tmp_map: [Handler; 16],
+    pub(crate) oam_dma_map: [Handler; 16],
 }
 
 impl Bus {
@@ -118,17 +125,23 @@ impl Bus {
             vram_bank_select: 0,
 
             map: std::array::from_fn(|_| Handler::Debug),
+            tmp_map: std::array::from_fn(|_| Handler::Debug),
+            oam_dma_map: std::array::from_fn(|_| Handler::Debug),
         }
     }
 
     pub fn new(mut cart: Cart, bios: Option<Vec<u8>>) -> Self {
-        let vram_size = if cart.header.is_cgb() {
+        // if we have a cgb boot, it means we NEED to run from a CGB
+        let is_cgb_booted =
+            bios.as_ref().is_some_and(|bytes| bytes.len() > 0x100) || cart.header.is_cgb();
+
+        let vram_size = if is_cgb_booted {
             VRAM_BANK_SIZE * 2
         } else {
             VRAM_BANK_SIZE
         };
 
-        let wram_size = if cart.header.is_cgb() {
+        let wram_size = if is_cgb_booted {
             WRAM_BANK_SIZE * 8
         } else {
             WRAM_BANK_SIZE * 2
@@ -158,6 +171,8 @@ impl Bus {
 
             header: cart.header,
             map: DEFAULT_MAP,
+            tmp_map: DEFAULT_MAP,
+            oam_dma_map: std::array::from_fn(|_| Handler::OpenBus),
         };
 
         res.rom0_banking.map(0);
@@ -199,6 +214,14 @@ impl Bus {
         }
     }
 
+    pub fn rom0(&mut self, addr: u16) -> &mut u8 {
+        todo!()
+    }
+
+    pub fn rom1(&mut self, addr: u16) -> &mut u8 {
+        todo!()
+    }
+
     pub fn vram_direct_read(&self, addr: u16) -> u8 {
         self.vram[self.vram_banking.translate(addr)]
     }
@@ -211,12 +234,28 @@ impl Bus {
         self.vram[(8 * 1024) | (addr as usize - 0x8000)]
     }
 
+    pub fn sram(&mut self, addr: u16) -> &mut u8 {
+        todo!()
+    }
+
+    pub fn wram0(&mut self, addr: u16) -> &mut u8 {
+        todo!()
+    }
+
+    pub fn wram1(&mut self, addr: u16) -> &mut u8 {
+        todo!()
+    }
+
     pub fn oam_direct_read(&self, addr: u16) -> u8 {
         self.oam[addr as usize - 0xfe00]
     }
 
     pub fn oam_direct_write(&mut self, addr: u16, val: u8) {
         self.oam[addr as usize - 0xfe00] = val;
+    }
+
+    pub fn hram(&mut self, addr: u16) -> &mut u8 {
+        todo!()
     }
 }
 
@@ -235,15 +274,30 @@ impl GbEmulator {
             Handler::Wram1 => bus.wram[bus.wram_banking.translate(addr)],
             Handler::Mbc2Ram => bus.sram[addr as usize % 512],
             Handler::IO => 0xff,
+            Handler::HramOnly => {
+                if matches!(addr, 0xff80..=0xfffe) {
+                    bus.hram[addr as usize - 0xff80]
+                } else {
+                    0xff
+                }
+            }
             Handler::Debug => bus.wram[addr as usize],
         }
     }
 
     pub fn dispatch_read(&mut self, addr: u16) -> u8 {
+        self.read_with_map(addr, |bus| &bus.map)
+    }
+
+    pub fn dispatch_write(&mut self, addr: u16, val: u8) {
+        self.write_with_map(addr, val, |bus| &bus.map);
+    }
+
+    pub(crate) fn read_with_map(&mut self, addr: u16, map: fn(&Bus) -> &[Handler; 16]) -> u8 {
         let bus = &mut self.bus;
 
         let handler = addr >> 12;
-        let res = match bus.map[handler as usize] {
+        match map(bus)[handler as usize] {
             Handler::Rom0 => bus.rom[bus.rom0_banking.translate(addr)],
             Handler::Rom1 => bus.rom[bus.rom1_banking.translate(addr)],
             Handler::OpenBus => 0xff,
@@ -260,17 +314,27 @@ impl GbEmulator {
             Handler::Wram0 => bus.wram[addr as usize - WRAM0_START as usize],
             Handler::Wram1 => bus.wram[bus.wram_banking.translate(addr)],
             Handler::IO => self.io_read(addr),
+            Handler::HramOnly => {
+                if matches!(addr, 0xff80..=0xfffe) {
+                    bus.hram[addr as usize - 0xff80]
+                } else {
+                    0xff
+                }
+            }
             Handler::Debug => bus.wram[addr as usize],
-        };
-
-        res
+        }
     }
 
-    pub fn dispatch_write(&mut self, addr: u16, val: u8) {
+    pub(crate) fn write_with_map(
+        &mut self,
+        addr: u16,
+        val: u8,
+        map: fn(&mut Bus) -> &[Handler; 16],
+    ) {
         let bus = &mut self.bus;
 
         let handler = addr >> 12;
-        match bus.map[handler as usize] {
+        match map(bus)[handler as usize] {
             Handler::Rom0 | Handler::Rom1 => self.mbc(addr, val),
             Handler::OpenBus | Handler::SramReadOnly => {}
 
@@ -283,6 +347,11 @@ impl GbEmulator {
             Handler::Wram0 => bus.wram[addr as usize - WRAM0_START as usize] = val,
             Handler::Wram1 => bus.wram[bus.wram_banking.translate(addr)] = val,
             Handler::IO => self.io_write(addr, val),
+            Handler::HramOnly => {
+                if matches!(addr, 0xff80..=0xfffe) {
+                    bus.hram[addr as usize - 0xff80] = val;
+                }
+            }
 
             Handler::Mbc2Ram => bus.sram[addr as usize % 512] = (val & 0x0f) | 0xf0,
             Handler::Debug => bus.wram[addr as usize] = val,
@@ -290,6 +359,7 @@ impl GbEmulator {
     }
 
     fn io_read(&mut self, addr: u16) -> u8 {
+        // TODO: OAM should be unmapped during DMA!
         if 0xfe00 <= addr && addr <= 0xfe9f {
             // OAM
             return if self.ppu.stat.mode().into_bits() < 2 {
@@ -326,16 +396,11 @@ impl GbEmulator {
             0xff4a => self.ppu.wy,
             0xff4b => self.ppu.wx,
 
-            0xff4c => {
-                if self.is_cgb() {
-                    self.clock.sys.into_bits()
-                } else {
-                    0xff
-                }
-            }
+            0xff4c => ((self.sys.compat_mode as u8) << 2) | 0xfb,
+
             0xff4d => {
                 if self.is_cgb() {
-                    self.clock.speed.into_bits()
+                    self.sys.clock.into_bits()
                 } else {
                     0xff
                 }
@@ -347,6 +412,20 @@ impl GbEmulator {
                     0xff
                 }
             }
+
+            0xff55 => {
+                if self.is_cgb() {
+                    self.hdma.read()
+                } else {
+                    0xff
+                }
+            }
+            0xff56 => {
+                // TODO: infrared communication
+                0xff
+            }
+
+            0xff6c => self.sys.priority_mode as u8 | !1,
 
             0xff70 => {
                 if self.is_cgb() {
@@ -362,10 +441,11 @@ impl GbEmulator {
     }
 
     fn io_write(&mut self, addr: u16, val: u8) {
+        // TODO: OAM should be unmapped during DMA!
         if 0xfe00 <= addr && addr <= 0xfe9f {
             // OAM
             if self.ppu.stat.mode().into_bits() < 2 {
-                self.bus.oam[addr as usize - 0xfe00] = val;
+                self.bus.oam_direct_write(addr, val);
             }
             return;
         } else if 0xff80 <= addr && addr <= 0xfffe {
@@ -390,14 +470,9 @@ impl GbEmulator {
             0xff06 => self.timer.tma = val,
             0xff07 => self.timer.tac = timer::Ctrl::from_bits_with_defaults(val),
 
-            0xff0f => {
-                self.bus.intf = IntFlags::from_bits_with_defaults(val);
-            }
+            0xff0f => self.bus.intf = IntFlags::from_bits_with_defaults(val),
 
-            0xff40 => {
-                self.lcdc_write(val);
-            }
-
+            0xff40 => self.lcdc_write(val),
             0xff41 => {
                 // only bits from 6 to 3 are writable
                 self.ppu.stat.set_lyc_int(val & 0x40 != 0);
@@ -417,13 +492,14 @@ impl GbEmulator {
             0xff4b => self.ppu.wx = val,
 
             0xff4c => {
-                if self.is_cgb() && self.bus.boot_sector0.is_some() {
-                    self.clock.sys = clock::Sys::from_bits_with_defaults(val)
+                if self.bus.boot_sector1.is_some() {
+                    // only cgb bios writes here
+                    self.sys.compat_mode = val & 0x4 != 0;
                 }
             }
             0xff4d => {
                 if self.is_cgb() {
-                    self.clock.speed.set_armed(val & 1 != 0);
+                    self.sys.clock.set_armed(val & 1 != 0);
                 }
             }
             0xff4f => {
@@ -444,6 +520,28 @@ impl GbEmulator {
                 }
             }
 
+            0xff51 => self.hdma.src = (self.hdma.src & 0x00ff) | ((val as u16) << 8),
+            0xff52 => self.hdma.src = (self.hdma.src & 0xff00) | (val as u16 & !0x7),
+            0xff53 => {
+                self.hdma.dst = 0x8000 | (self.hdma.dst & 0x00ff) | ((val as u16 & 0x1f) << 8)
+            }
+            0xff54 => self.hdma.dst = (self.hdma.dst & 0xff00) | (val as u16 & !0x7),
+            0xff55 => {
+                if self.is_cgb() {
+                    self.hdma.write(val);
+                }
+            }
+            0xff56 => {
+                // TODO: infrared communication
+            }
+
+            0xff6c => {
+                if self.bus.boot_sector1.is_some() {
+                    // only cgb bios writes here
+                    self.sys.compat_mode = val & 1 != 0;
+                }
+            }
+
             0xff70 => {
                 if self.is_cgb() {
                     self.bus.wram_banking.map((val & 0x3).max(1) as u16);
@@ -451,9 +549,7 @@ impl GbEmulator {
                 }
             }
 
-            0xffff => {
-                self.bus.inte = IntFlags::from_bits_with_defaults(val);
-            }
+            0xffff => self.bus.inte = IntFlags::from_bits_with_defaults(val),
 
             _ => {}
         }

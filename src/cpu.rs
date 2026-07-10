@@ -122,7 +122,7 @@ impl GbEmulator {
 
         self.timer_step();
         self.serial_step();
-        self.dma_step();
+        self.oam_dma_step();
 
         self.ppu_step();
         self.ppu_step();
@@ -823,9 +823,9 @@ impl GbEmulator {
     fn stop(&mut self, _get: OpGet<u8>) {
         // TODO not implemented fully
 
-        if self.clock.speed.armed() {
-            self.clock.speed.set_armed(false);
-            self.clock.speed.set_speed(true);
+        if self.sys.clock.armed() {
+            self.sys.clock.set_armed(false);
+            self.sys.clock.set_speed(true);
 
             for _ in 0..2050 {
                 self.tick();

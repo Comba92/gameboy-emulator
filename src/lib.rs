@@ -1,4 +1,4 @@
-use crate::emu::GbEmulator;
+use crate::{bus::Handler, emu::GbEmulator};
 
 mod bus;
 pub mod cpu;
@@ -20,30 +20,23 @@ mod clock {
         speed: bool,
     }
 
-    #[bitfield(u8)]
-    pub struct Sys {
-        #[bits(2, default = 0x3)]
-        _unused0: u8,
-        compat_mode: bool,
-        #[bits(5, default = 0x1f)]
-        _unused1: u8,
+    pub struct System {
+        pub compat_mode: bool,
+        pub priority_mode: bool,
+        pub clock: Speed,
     }
 
-    pub struct Clock {
-        pub sys: Sys,
-        pub speed: Speed,
-    }
-
-    impl Clock {
+    impl System {
         pub fn new() -> Self {
             Self {
-                sys: Sys::new(),
-                speed: Speed::new(),
+                compat_mode: true, // we default to compatibility mode
+                priority_mode: true,
+                clock: Speed::new(),
             }
         }
 
         pub fn rate(&self) -> usize {
-            if self.speed.speed() {
+            if self.clock.speed() {
                 CBG_CLOCK_RATE
             } else {
                 DMG_CLOCK_RATE
@@ -132,29 +125,63 @@ mod serial {
 }
 
 mod dma {
-    pub struct Dma {
-        pub init_cycle: bool,
-        pub start: u8,
+    pub struct OamDma {
         pub addr: Option<u16>,
+        pub read: u8,
+        pub init_cycle: bool,
     }
 
-    impl Dma {
+    impl OamDma {
         pub fn new() -> Self {
             Self {
                 init_cycle: false,
                 addr: None,
-                start: 0xff,
+                read: 0xff,
             }
         }
 
         pub fn read(&self) -> u8 {
-            self.start
+            self.read
         }
 
         pub fn write(&mut self, val: u8) {
-            self.init_cycle = true;
-            self.start = val % 0xe0;
             self.addr = Some((val as u16 % 0xe0) << 8);
+            self.read = val % 0xe0;
+            self.init_cycle = true;
+        }
+    }
+
+    pub struct Hdma {
+        pub src: u16,
+        pub dst: u16,
+        pub read: u8,
+        pub len: u16,
+        pub mode: bool,
+
+        count: Option<u8>,
+    }
+    impl Hdma {
+        pub fn new() -> Self {
+            Self {
+                src: 0xffff,
+                dst: 0xffff,
+                read: 0xff,
+                len: 0,
+                mode: false,
+                count: None,
+            }
+        }
+
+        pub fn read(&self) -> u8 {
+            // ((self.mode as u8) << 7) | self.len
+            self.read
+        }
+
+        pub fn write(&mut self, val: u8) {
+            self.read = val;
+            self.mode = val & 0x80 != 0;
+            self.len = ((val as u16 & 0x7f) + 1) * 16;
+            self.count = Some(0);
         }
     }
 }
@@ -222,11 +249,11 @@ pub mod joypad {
 
 impl GbEmulator {
     pub(crate) fn in_double_speed(&self) -> bool {
-        self.clock.speed.speed()
+        self.sys.clock.speed()
     }
 
     pub(crate) fn clock_rate(&self) -> usize {
-        self.clock.rate()
+        self.sys.rate()
     }
 
     pub fn set_button(&mut self, input: joypad::Input, state: bool) {
@@ -317,7 +344,7 @@ impl GbEmulator {
         }
     }
 
-    pub(crate) fn dma_step(&mut self) {
+    pub(crate) fn oam_dma_step(&mut self) {
         let dma = &mut self.dma;
         // TODO: should block whole bus both for CPU and PPU
 
@@ -325,18 +352,66 @@ impl GbEmulator {
             if dma.init_cycle {
                 dma.init_cycle = false;
                 dma.addr = Some(addr);
+
+                // let is_cgb = self.is_cgb();
+
+                // // disable cpu memory bus
+                // let bus = &mut self.bus;
+                // bus.map.fill(Handler::OpenBus);
+                // bus.tmp_map.copy_from_slice(&bus.map);
+                // bus.oam_dma_map.copy_from_slice(&bus.map[..0xe]);
+
+                // bus.map[0xe] = Handler::HramOnly;
+                // bus.map[0xf] = Handler::HramOnly;
+
+                // if is_cgb {
+                //     // On CGB, the cartridge and WRAM are on separate buses. This means that the CPU can access ROM or cartridge SRAM during OAM DMA from WRAM, or WRAM during OAM DMA from ROM or SRAM. However, because a call writes a return address to the stack, and the stack and variables are usually in WRAM, it’s still recommended to busy-wait in HRAM for DMA to finish even on CGB.
+                //     if matches!(addr, bus::WRAM0_START..bus::WRAM_END) {
+                //         // keep rom and sram enabled
+                //         bus.map[..=0xa].copy_from_slice(&bus.tmp_map[..0xa]);
+                //         bus.map[0x8] = bus.tmp_map[0x8];
+                //     } else if matches!(addr, bus::SRAM_START..bus::SRAM_END) || addr < bus::ROM_END
+                //     {
+                //         // keep wram enabled
+                //         bus.map[0xc..=0xd].copy_from_slice(&bus.tmp_map[0xc..=0xd]);
+                //     }
+                // }
                 return;
             }
 
+            // let val = self.read_with_map(addr, |bus| &bus.oam_dma_map);
             let val = self.dispatch_read(addr);
             self.bus.oam_direct_write(0xfe00 | (addr & 0x00ff), val);
 
             if addr & 0x00ff == 0x9f {
+                // restore cpu memory bus
+                // self.bus.map.copy_from_slice(&self.bus.tmp_map);
+
                 self.dma.addr = None;
-                self.dma.start = 0xff;
+                self.dma.read = 0xff;
             } else {
                 self.dma.addr = Some(addr + 1);
             }
         }
     }
+
+    // pub(crate) fn hdma_step(&mut self) {
+    //     let hdma = &mut self.hdma;
+
+    //     if let Some(len) = hdma.len {
+    //         if hdma.mode {
+    //             // hblank dma
+    //         } else {
+    //             // general purpose dma
+    //             let val = self.dispatch_read(addr);
+    //             self.dispatch_write(addr, val);
+
+    //             if len == 1 {
+    //                 hdma.len = None;
+    //             } else {
+    //                 hdma.len = Some(len - 1);
+    //             }
+    //         }
+    //     }
+    // }
 }

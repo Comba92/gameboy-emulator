@@ -1,8 +1,8 @@
 use crate::{
     bus::{Bus, Mbc},
-    clock::Clock,
+    clock::System,
     cpu::CpuSm83,
-    dma::Dma,
+    dma::{Hdma, OamDma},
     joypad::Joypad,
     ppu::{DMG_PALETTE, Ppu},
     rom::{self, Cart, RomData, is_valid_bios},
@@ -26,11 +26,12 @@ pub struct GbEmulator {
     pub(crate) bus: Bus,
     pub(crate) ppu: Ppu,
     pub(crate) mbc: Mbc,
-    pub(crate) dma: Dma,
+    pub(crate) dma: OamDma,
+    pub(crate) hdma: Hdma,
     pub(crate) serial: Serial,
     pub(crate) timer: Timer,
     pub(crate) joy: Joypad,
-    pub(crate) clock: Clock,
+    pub(crate) sys: System,
 
     pub(crate) output: GbOutput,
 }
@@ -44,9 +45,10 @@ impl GbEmulator {
             mbc: Mbc::None,
             timer: Timer::new(),
             serial: Serial::new(),
-            dma: Dma::new(),
+            dma: OamDma::new(),
+            hdma: Hdma::new(),
             joy: Joypad::new(),
-            clock: Clock::new(),
+            sys: System::new(),
             output: GbOutput::default(),
         }
     }
@@ -78,9 +80,10 @@ impl GbEmulator {
             ppu: Ppu::new(),
             timer: Timer::new(),
             serial: Serial::new(),
-            dma: Dma::new(),
+            dma: OamDma::new(),
+            hdma: Hdma::new(),
             joy: Joypad::new(),
-            clock: Clock::new(),
+            sys: System::new(),
             output: GbOutput::default(),
         })
     }
@@ -98,7 +101,7 @@ impl GbEmulator {
     }
 
     pub fn is_cgb(&self) -> bool {
-        self.rom_info().is_cgb()
+        self.rom_info().is_cgb() || self.bus.boot_sector1.is_some()
     }
 
     pub fn step(&mut self) {
