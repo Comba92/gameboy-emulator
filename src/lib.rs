@@ -346,46 +346,44 @@ impl GbEmulator {
 
     pub(crate) fn oam_dma_step(&mut self) {
         let dma = &mut self.dma;
-        // TODO: should block whole bus both for CPU and PPU
 
         if let Some(addr) = dma.addr {
             if dma.init_cycle {
                 dma.init_cycle = false;
                 dma.addr = Some(addr);
 
-                // let is_cgb = self.is_cgb();
+                let is_cgb = self.is_cgb();
 
-                // // disable cpu memory bus
-                // let bus = &mut self.bus;
-                // bus.map.fill(Handler::OpenBus);
-                // bus.tmp_map.copy_from_slice(&bus.map);
-                // bus.oam_dma_map.copy_from_slice(&bus.map[..0xe]);
+                // disable cpu memory bus
+                let bus = &mut self.bus;
+                bus.tmp_map.copy_from_slice(&bus.map);
+                bus.oam_dma_map[..0xe].copy_from_slice(&bus.map[..0xe]);
 
-                // bus.map[0xe] = Handler::HramOnly;
-                // bus.map[0xf] = Handler::HramOnly;
+                bus.map.fill(Handler::OpenBus);
+                bus.map[0xe] = Handler::HramOnly;
+                bus.map[0xf] = Handler::HramOnly;
 
-                // if is_cgb {
-                //     // On CGB, the cartridge and WRAM are on separate buses. This means that the CPU can access ROM or cartridge SRAM during OAM DMA from WRAM, or WRAM during OAM DMA from ROM or SRAM. However, because a call writes a return address to the stack, and the stack and variables are usually in WRAM, it’s still recommended to busy-wait in HRAM for DMA to finish even on CGB.
-                //     if matches!(addr, bus::WRAM0_START..bus::WRAM_END) {
-                //         // keep rom and sram enabled
-                //         bus.map[..=0xa].copy_from_slice(&bus.tmp_map[..0xa]);
-                //         bus.map[0x8] = bus.tmp_map[0x8];
-                //     } else if matches!(addr, bus::SRAM_START..bus::SRAM_END) || addr < bus::ROM_END
-                //     {
-                //         // keep wram enabled
-                //         bus.map[0xc..=0xd].copy_from_slice(&bus.tmp_map[0xc..=0xd]);
-                //     }
-                // }
+                if is_cgb {
+                    // On CGB, the cartridge and WRAM are on separate buses. This means that the CPU can access ROM or cartridge SRAM during OAM DMA from WRAM, or WRAM during OAM DMA from ROM or SRAM. However, because a call writes a return address to the stack, and the stack and variables are usually in WRAM, it’s still recommended to busy-wait in HRAM for DMA to finish even on CGB.
+                    if matches!(addr, bus::WRAM0_START..bus::WRAM_END) {
+                        // keep rom and sram enabled
+                        bus.map[..=0xa].copy_from_slice(&bus.tmp_map[..0xa]);
+                        bus.map[0x8] = bus.tmp_map[0x8];
+                    } else if matches!(addr, bus::SRAM_START..bus::SRAM_END) || addr < bus::ROM_END
+                    {
+                        // keep wram enabled
+                        bus.map[0xc..=0xd].copy_from_slice(&bus.tmp_map[0xc..=0xd]);
+                    }
+                }
                 return;
             }
 
-            // let val = self.read_with_map(addr, |bus| &bus.oam_dma_map);
-            let val = self.dispatch_read(addr);
+            let val = self.read_with_map(addr, |bus| &bus.oam_dma_map);
             self.bus.oam_direct_write(0xfe00 | (addr & 0x00ff), val);
 
             if addr & 0x00ff == 0x9f {
                 // restore cpu memory bus
-                // self.bus.map.copy_from_slice(&self.bus.tmp_map);
+                self.bus.map.copy_from_slice(&self.bus.tmp_map);
 
                 self.dma.addr = None;
                 self.dma.read = 0xff;
