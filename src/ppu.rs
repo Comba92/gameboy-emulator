@@ -8,6 +8,31 @@ use std::collections::{HashMap, VecDeque};
 pub const DMG_PALETTE: [(u8, u8, u8); 4] =
     [(155, 188, 15), (139, 172, 15), (48, 98, 48), (15, 56, 15)];
 
+fn from_rgb888_to_rgb555((r8, g8, b8): (u8, u8, u8)) -> (u8, u8) {
+    let (r8, g8, b8) = (r8 as u32, g8 as u32, b8 as u32);
+
+    let r5 = (r8 >> 3) << 10;
+    let g5 = (g8 >> 3) << 5;
+    let b5 = b8 >> 3;
+
+    let res = r5 | g5 | b5;
+    (res as u8, (res >> 8) as u8)
+}
+
+fn from_rgb555_to_rgb888(color_lo: u8, color_hi: u8) -> (u8, u8, u8) {
+    let color16 = ((color_hi as u32) << 8) | (color_lo as u32);
+
+    let r5 = color16 & 0x1f;
+    let g5 = (color16 >> 5) & 0x1f;
+    let b5 = (color16 >> 10) & 0x1f;
+
+    let r8 = r5 * 255 / 31;
+    let g8 = g5 * 255 / 31;
+    let b8 = b5 * 255 / 31;
+
+    (r8 as u8, g8 as u8, b8 as u8)
+}
+
 pub const OAM_SCAN_DOTS: u16 = 80;
 pub const SCANLINE_DOTS: u16 = 456;
 pub const SCANLINES: u8 = 154;
@@ -48,19 +73,15 @@ pub struct Stat {
     _unused: bool,
 }
 
-#[bitfield(u16)]
+#[bitfield(u8)]
 struct FifoPixel {
     #[bits(2)]
     color: u8,
     dmg_palette: bool,
     #[bits(3)]
     cgb_palette: u8,
-    #[bits(4)]
-    idx: u8,
     priority: bool,
-
-    #[bits(5)]
-    _unused: u8,
+    _unused: bool,
 }
 
 #[bitfield(u8)]
@@ -119,7 +140,11 @@ impl Default for BgFetcherState {
 
 impl BgFetcherState {
     pub fn start(scx: u8, scy: u8) -> Self {
-        Self::Wait { count: 6, scx, scy }
+        Self::Wait {
+            count: 6,
+            scx: scx,
+            scy,
+        }
     }
 }
 
@@ -138,6 +163,61 @@ enum ObjFetcherState {
     },
 }
 
+pub struct PaletteRam(pub [u8; 64]);
+impl Default for PaletteRam {
+    fn default() -> Self {
+        Self([0; _])
+    }
+}
+impl PaletteRam {
+    pub fn new_bg(is_cgb: bool) -> Self {
+        let mut res = [0; _];
+
+        if !is_cgb {
+            for (idx, color) in DMG_PALETTE.iter().copied().enumerate() {
+                let (lo, hi) = from_rgb888_to_rgb555(color);
+
+                res[2 * idx + 0] = lo;
+                res[2 * idx + 1] = hi;
+            }
+        }
+
+        Self(res)
+    }
+
+    pub fn new_obj(is_cgb: bool) -> Self {
+        let mut res = [0; _];
+
+        if !is_cgb {
+            for (idx, color) in DMG_PALETTE.iter().copied().enumerate() {
+                let (lo, hi) = from_rgb888_to_rgb555(color);
+
+                // obj palette 0
+                res[2 * idx + 0] = lo;
+                res[2 * idx + 1] = hi;
+
+                // obj palette 1
+                res[2 * idx + 4 + 0] = lo;
+                res[2 * idx + 4 + 1] = hi;
+            }
+        }
+
+        Self(res)
+    }
+
+    pub fn rgba888(&self, idx: u8) -> (u8, u8, u8) {
+        from_rgb555_to_rgb888(self.0[idx as usize], self.0[idx as usize | 1])
+    }
+}
+
+#[bitfield(u8)]
+pub struct PaletteIdx {
+    #[bits(6)]
+    address: u8,
+    _unused: bool,
+    auto_incr: bool,
+}
+
 #[derive(Default)]
 pub struct Ppu {
     pub lcdc: Ctrl,
@@ -153,11 +233,10 @@ pub struct Ppu {
     pub obp0: u8,
     pub obp1: u8,
 
-    // pub cgb_palettes: [u16; 64],
-    pub bgpi: u8,
-    pub bgpd: u8,
-    pub obpi: u8,
-    pub obpd: u8,
+    pub bg_palettes: PaletteRam,
+    pub obj_palettes: PaletteRam,
+    pub bgpi: PaletteIdx,
+    pub obpi: PaletteIdx,
 
     wlc: u8,
     wy_eq_ly: bool,
@@ -184,6 +263,8 @@ pub struct Ppu {
 impl Ppu {
     pub fn new() -> Self {
         Self {
+            bg_palettes: PaletteRam::new_bg(false),
+            obj_palettes: PaletteRam::new_obj(false),
             ..Default::default()
         }
     }
@@ -245,36 +326,31 @@ impl GbEmulator {
         }
     }
 
-    fn fetch_bg(&mut self, scx: u8, scy: u8) -> (u8, u8, Attr) {
+    fn fetch_bg_tile(&mut self, scx: u8, scy: u8) -> (u8, u8, Attr) {
         let is_cgb = self.is_cgb();
         let ppu = &mut self.ppu;
 
-        let (x, y, tilemap) = if ppu.wnd_rendering {
+        let (x, y, row, tilemap) = if ppu.wnd_rendering {
             let tilemap = if ppu.lcdc.wnd_map() { 0x9c00 } else { 0x9800 };
 
             let x = ppu.fetch_coarse_x as u16;
             let y = 32 * (ppu.wlc as u16 / 8);
+            let row = ppu.wlc as u16 % 8;
 
-            (x, y, tilemap)
+            (x, y, row, tilemap)
         } else {
             let tilemap = if ppu.lcdc.bg_map() { 0x9c00 } else { 0x9800 };
 
             let x = (scx as u16 / 8 + ppu.fetch_coarse_x as u16) % 32;
-            let y_with_scroll = (ppu.ly as u16 + scy as u16) % 256; // y with scroll
-            let y = 32 * (y_with_scroll / 8);
-            (x, y, tilemap)
+            let y_with_scroll = ppu.ly as u16 + scy as u16; // y with scroll
+            let y = 32 * ((y_with_scroll % 256) / 8);
+            let row = y_with_scroll % 8;
+            (x, y, row, tilemap)
         };
 
         let tilemap_offset = (y + x) % 1024;
         let tilemap_addr = tilemap | tilemap_offset;
-        let tile_id = self.bus.vram0_read(tilemap_addr);
-
-        let ppu = &mut self.ppu;
-        let row = if ppu.wnd_rendering {
-            ppu.wlc as u16 % 8
-        } else {
-            (ppu.ly as u16 + scy as u16) % 8
-        };
+        let tile_id = self.bus.vram0(tilemap_addr);
 
         let tile_start = if self.ppu.lcdc.bg_wnd_tiles() {
             // unsigned mode
@@ -285,42 +361,32 @@ impl GbEmulator {
             (0x9000 + offset) as u16
         };
 
-        if is_cgb {
-            let attr = Attr::from_bits(self.bus.vram1_read(tilemap_addr));
-            let offset = if attr.flip_y() {
-                2 * (7 - row)
-            } else {
-                2 * row
-            };
-            let tile_addr = tile_start | offset;
-
-            let tile_fetch = if attr.bank() {
-                Bus::vram1_read
-            } else {
-                Bus::vram0_read
-            };
-
-            let mut tile_lo = tile_fetch(&self.bus, tile_addr);
-            let mut tile_hi = tile_fetch(&self.bus, tile_addr + 1);
-
-            if attr.flip_x() {
-                tile_lo = tile_lo.reverse_bits();
-                tile_hi = tile_hi.reverse_bits();
-            }
-
-            (tile_lo, tile_hi, attr)
+        let attr = if is_cgb {
+            Attr::from_bits(self.bus.vram1(tilemap_addr))
         } else {
-            let offset = 2 * row;
-            let tile_addr = tile_start | offset;
+            Attr::new()
+        };
 
-            let tile_lo = self.bus.vram0_read(tile_addr);
-            let tile_hi = self.bus.vram0_read(tile_addr + 1);
+        let offset = if attr.flip_y() {
+            2 * (7 - row)
+        } else {
+            2 * row
+        };
+        let tile_addr = tile_start | offset;
+        let tile_fetch = if attr.bank() { Bus::vram1 } else { Bus::vram0 };
 
-            (tile_lo, tile_hi, Attr::new())
+        let mut tile_lo = tile_fetch(&self.bus, tile_addr);
+        let mut tile_hi = tile_fetch(&self.bus, tile_addr + 1);
+
+        if attr.flip_x() {
+            tile_lo = tile_lo.reverse_bits();
+            tile_hi = tile_hi.reverse_bits();
         }
+
+        (tile_lo, tile_hi, attr)
     }
 
-    fn fetch_obj(&mut self, obj_idx: u8) -> (u8, u8) {
+    fn fetch_obj_tile(&mut self, obj_idx: u8) -> (u8, u8) {
         let ppu = &self.ppu;
 
         let obj = &ppu.obj_buf[obj_idx as usize];
@@ -341,9 +407,9 @@ impl GbEmulator {
         let flip_x = obj.attr.flip_x();
 
         let tile_fetch = if obj.attr.bank() {
-            Bus::vram1_read
+            Bus::vram1
         } else {
-            Bus::vram0_read
+            Bus::vram0
         };
 
         let mut tile_lo = tile_fetch(&self.bus, tile_addr);
@@ -357,50 +423,19 @@ impl GbEmulator {
         (tile_lo, tile_hi)
     }
 
-    fn drawing_tick(&mut self) {
-        let is_cgb = self.is_cgb();
+    fn bg_fetch_tick(&mut self) {
         let ppu = &mut self.ppu;
-
-        // window collision check
-        if !ppu.wnd_rendering
-            && (ppu.lcdc.bg_wnd_priority() || is_cgb)
-            && ppu.lcdc.wnd_enable()
-            && ppu.wy_eq_ly
-            && ppu.fetch_fine_x as i16 >= ppu.wx as i16 - 7
-        {
-            // we've reached the window
-            ppu.fetch_coarse_x = 0;
-            ppu.bg_fetch = BgFetcherState::start(ppu.scx, ppu.scy);
-            ppu.fetch_scrolled = (ppu.wx < 7).then_some(7 - ppu.wx);
-            ppu.bg_fifo.clear();
-
-            ppu.wnd_rendering = true;
-        }
-
-        // object collision check
-        if matches!(ppu.obj_fetch, ObjFetcherState::Idle) {
-            if let Some(obj_idx) = ppu.obj_pos_x.get(&(ppu.fetch_fine_x + 8)).copied() {
-                ppu.bg_fetch = BgFetcherState::Idle;
-                ppu.obj_fetch = ObjFetcherState::Wait { count: 6, obj_idx };
-            }
-        }
 
         match ppu.bg_fetch {
             BgFetcherState::Idle => {}
             BgFetcherState::Wait { count, scx, scy } => {
                 self.ppu.bg_fetch = if count == 0 {
-                    // if ppu.fetch_fine_x < 0 {
-                    //     // first tile is discarded
-                    //     ppu.fetch_fine_x += 8;
-                    //     BgFetcherState::start(ppu.scx, ppu.scy)
-                    // } else {
-                    let (tile_lo, tile_hi, attr) = self.fetch_bg(scx, scy);
+                    let (tile_lo, tile_hi, attr) = self.fetch_bg_tile(scx, scy);
                     BgFetcherState::Push {
                         tile_lo,
                         tile_hi,
                         attr,
                     }
-                    // }
                 } else {
                     BgFetcherState::Wait {
                         count: count - 1,
@@ -450,13 +485,15 @@ impl GbEmulator {
                 }
             }
         }
+    }
 
+    fn obj_fetch_tick(&mut self) {
         let ppu = &mut self.ppu;
         match ppu.obj_fetch {
             ObjFetcherState::Idle => {}
             ObjFetcherState::Wait { count, obj_idx } => {
                 self.ppu.obj_fetch = if count == 0 {
-                    let (tile_lo, tile_hi) = self.fetch_obj(obj_idx);
+                    let (tile_lo, tile_hi) = self.fetch_obj_tile(obj_idx);
                     ObjFetcherState::Push {
                         obj_idx,
                         tile_lo,
@@ -490,7 +527,6 @@ impl GbEmulator {
                         .with_priority(obj.attr.priority())
                         .with_dmg_palette(obj.attr.dmg_palette())
                         .with_cgb_palette(obj.attr.cgb_palette())
-                        .with_idx(obj.idx)
                         .build();
 
                     if let Some(old_pixel) = ppu.obj_fifo.get_mut(i) {
@@ -508,61 +544,97 @@ impl GbEmulator {
                 ppu.bg_fetch = BgFetcherState::start(ppu.scx, ppu.scy);
             }
         }
+    }
+
+    fn render_pixel(&mut self) {
+        let is_cgb = !self.sys.priority_mode;
 
         let ppu = &mut self.ppu;
         if ppu.bg_fifo.len() > 8 && matches!(ppu.obj_fetch, ObjFetcherState::Idle) {
             let bg_pixel = ppu.bg_fifo.pop_front().unwrap();
             let obj_pixel = ppu.obj_fifo.pop_front().unwrap_or(0.into());
 
-            // if is_cgb {
-            //     let obj_has_priority = bg_pixel.color() == 0
-            //         || !ppu.lcdc.bg_wnd_priority()
-            //         || (!bg_pixel.priority() && !obj_pixel.priority());
+            if is_cgb {
+                // CGB rendering
+                let obj_has_priority = bg_pixel.color() == 0
+                    || !ppu.lcdc.bg_wnd_priority()
+                    || (!bg_pixel.priority() && !obj_pixel.priority());
 
-            //     if ppu.lcdc.obj_enable() && obj_has_priority {
-            //         let pal = if obj_pixel.dmg_palette() {
-            //             ppu.obp1
-            //         } else {
-            //             ppu.obp0
-            //         };
-
-            //         let color_id = (pal >> (2 * obj_pixel.color())) & 0x3;
-            //         self.push_pixel(color_id);
-            //     } else {
-            //         let color_id = (ppu.bgp >> (2 * bg_pixel.color())) & 0x3;
-            //         self.push_pixel(color_id);
-            //     }
-            // } else {
-            if ppu.lcdc.obj_enable()
-                && obj_pixel.color() > 0
-                && (!obj_pixel.priority() || bg_pixel.color() == 0)
-            {
-                let pal = if obj_pixel.dmg_palette() {
-                    ppu.obp1
+                if ppu.lcdc.obj_enable() && obj_pixel.color() > 0 && obj_has_priority {
+                    let palette_idx = 4 * obj_pixel.cgb_palette() + obj_pixel.color();
+                    self.push_pixel(palette_idx, |p| &p.obj_palettes);
                 } else {
-                    ppu.obp0
-                };
-
-                let color_id = (pal >> (2 * obj_pixel.color())) & 0x3;
-                self.push_pixel(color_id);
-            } else if ppu.lcdc.bg_wnd_priority() {
-                let color_id = (ppu.bgp >> (2 * bg_pixel.color())) & 0x3;
-                self.push_pixel(color_id);
+                    let palette_idx = 4 * bg_pixel.cgb_palette() + bg_pixel.color();
+                    self.push_pixel(palette_idx, |p| &p.bg_palettes);
+                }
             } else {
-                self.push_pixel(0);
+                // DMG rendering
+                if ppu.lcdc.obj_enable()
+                    && obj_pixel.color() > 0
+                    && (!obj_pixel.priority() || bg_pixel.color() == 0)
+                {
+                    let (pal, pal_offset) = if obj_pixel.dmg_palette() {
+                        (ppu.obp1, 4)
+                    } else {
+                        (ppu.obp0, 0)
+                    };
+
+                    let color_id = pal >> (2 * obj_pixel.color()) & 0x3;
+                    let palette_idx = pal_offset + color_id;
+                    self.push_pixel(palette_idx, |p| &p.obj_palettes);
+                } else if ppu.lcdc.bg_wnd_priority() {
+                    let palette_idx = (ppu.bgp >> (2 * bg_pixel.color())) & 0x3;
+                    self.push_pixel(palette_idx, |p| &p.bg_palettes);
+                } else {
+                    self.push_pixel(0, |p| &p.bg_palettes);
+                }
             }
-            // }
 
             self.ppu.fetch_fine_x += 1;
         }
     }
 
-    fn push_pixel(&mut self, color_id: u8) {
-        let color = DMG_PALETTE[color_id as usize];
+    fn push_pixel(&mut self, idx: u8, pal: fn(&Ppu) -> &PaletteRam) {
+        let color = pal(&self.ppu).rgba888(2 * idx);
+
         self.output.videobuf_back.0[self.ppu.pixel_idx + 0] = color.0;
         self.output.videobuf_back.0[self.ppu.pixel_idx + 1] = color.1;
         self.output.videobuf_back.0[self.ppu.pixel_idx + 2] = color.2;
         self.ppu.pixel_idx += 4;
+    }
+
+    fn drawing_tick(&mut self) {
+        let is_cgb = self.is_cgb();
+        let ppu = &mut self.ppu;
+
+        // window collision check
+        if !ppu.wnd_rendering
+            && (ppu.lcdc.bg_wnd_priority() || is_cgb)
+            && ppu.lcdc.wnd_enable()
+            && ppu.wy_eq_ly
+            && ppu.fetch_fine_x as i16 >= ppu.wx as i16 - 7
+        {
+            // we've reached the window
+            ppu.fetch_coarse_x = 0;
+            ppu.bg_fetch = BgFetcherState::start(ppu.scx, ppu.scy);
+            ppu.fetch_scrolled = (ppu.wx < 7).then_some(7 - ppu.wx);
+            ppu.bg_fifo.clear();
+
+            ppu.wnd_rendering = true;
+        }
+
+        // object collision check
+        if matches!(ppu.obj_fetch, ObjFetcherState::Idle) {
+            if let Some(obj_idx) = ppu.obj_pos_x.get(&(ppu.fetch_fine_x + 8)).copied() {
+                ppu.bg_fetch = BgFetcherState::Idle;
+                ppu.obj_fetch = ObjFetcherState::Wait { count: 6, obj_idx };
+            }
+        }
+
+        self.bg_fetch_tick();
+        self.obj_fetch_tick();
+
+        self.render_pixel();
     }
 
     fn update_stat_intr(&mut self) {
@@ -629,12 +701,16 @@ impl GbEmulator {
     }
 
     pub fn ppu_step(&mut self) {
+        self.update_stat_intr();
+
         let ppu = &mut self.ppu;
         if !ppu.lcdc.lcd_enable() {
             ppu.pixel_idx += 4;
             if ppu.pixel_idx >= FRAMEBUF_SIZE {
-                self.output.frame_ready = true;
                 ppu.pixel_idx = 0;
+                self.output.frame_ready = true;
+            } else {
+                self.push_pixel(0, |p| &p.obj_palettes);
             }
             return;
         }
@@ -646,14 +722,15 @@ impl GbEmulator {
                 let ppu = &mut self.ppu;
                 ppu.dot += 1;
                 if ppu.dot >= OAM_SCAN_DOTS {
-                    let is_cgb = self.is_cgb();
                     let ppu = &mut self.ppu;
-                    if is_cgb {
-                        ppu.obj_buf.sort_by(|a, b| a.idx.cmp(&b.idx))
-                    } else {
+                    if !self.sys.priority_mode {
+                        // DMG priority mode
                         // TODO: not sure why should compare b.idx against a.idx (reversed)
                         ppu.obj_buf
                             .sort_by(|a, b| a.x.cmp(&b.x).then(b.idx.cmp(&a.idx)));
+                    } else {
+                        // CGB priority mode
+                        ppu.obj_buf.sort_by(|a, b| a.idx.cmp(&b.idx))
                     }
 
                     ppu.obj_pos_x.extend(
@@ -719,7 +796,5 @@ impl GbEmulator {
                 }
             }
         }
-
-        self.update_stat_intr();
     }
 }

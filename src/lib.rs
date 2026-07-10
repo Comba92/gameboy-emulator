@@ -9,6 +9,8 @@ mod rom;
 mod clock {
     use bitfields::bitfield;
 
+    use crate::rom;
+
     pub const DMG_CLOCK_RATE: usize = 4194304;
     pub const CBG_CLOCK_RATE: usize = 2 * DMG_CLOCK_RATE;
 
@@ -21,6 +23,7 @@ mod clock {
     }
 
     pub struct System {
+        pub console_mode: rom::ConsoleMode,
         pub compat_mode: bool,
         pub priority_mode: bool,
         pub clock: Speed,
@@ -29,8 +32,9 @@ mod clock {
     impl System {
         pub fn new() -> Self {
             Self {
-                compat_mode: true, // we default to compatibility mode
-                priority_mode: true,
+                console_mode: rom::ConsoleMode::DMG,
+                compat_mode: false,
+                priority_mode: false,
                 clock: Speed::new(),
             }
         }

@@ -12,10 +12,7 @@ use sdl2::{
     pixels::PixelFormatEnum,
     render::ScaleMode,
 };
-use tomboyemu_core::{
-    emu::{self, GbEmulator},
-    joypad,
-};
+use tomboyemu_core::{emu::GbEmulator, joypad};
 const AXIS_DEAD_ZONE: i16 = 10_000;
 
 fn arc_mutex<T>(inner: T) -> Arc<Mutex<T>> {
@@ -52,6 +49,7 @@ fn main() {
     println!("Current dir: {:?}", std::env::current_dir());
 
     let mut bios_path = PathBuf::from("utils/cgb_boot.bin");
+    // let mut bios_path = PathBuf::from("utils/dmg_boot.bin");
     let mut rom_path = PathBuf::from("../roms/cgb-acid2.gbc");
 
     // let emu = GbEmulator::load_bios_only(Some(bios)).unwrap();

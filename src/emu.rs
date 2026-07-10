@@ -101,7 +101,8 @@ impl GbEmulator {
     }
 
     pub fn is_cgb(&self) -> bool {
-        self.rom_info().is_cgb() || self.bus.boot_sector1.is_some()
+        // if in CGB Compatibility mode, only the CGB boot can access the CGB registers!
+        self.rom_info().mode == rom::ConsoleMode::CGBOnly || self.bus.boot_sector1.is_some()
     }
 
     pub fn step(&mut self) {

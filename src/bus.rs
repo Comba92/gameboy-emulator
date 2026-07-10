@@ -157,9 +157,9 @@ impl Bus {
 
             hram: [0xff; _],
             oam: [0xff; _],
-            vram: vec![0xff; vram_size].into_boxed_slice(),
-            sram: vec![0xff; cart.header.ram_size as usize].into_boxed_slice(),
-            wram: vec![0xff; wram_size].into_boxed_slice(),
+            vram: vec![0; vram_size].into_boxed_slice(),
+            sram: vec![0; cart.header.ram_size as usize].into_boxed_slice(),
+            wram: vec![0; wram_size].into_boxed_slice(),
 
             rom0_banking: Banker::new(ROM_BANK_SIZE, cart.header.rom_size),
             rom1_banking: Banker::new(ROM_BANK_SIZE, cart.header.rom_size),
@@ -214,36 +214,16 @@ impl Bus {
         }
     }
 
-    pub fn rom0(&mut self, addr: u16) -> &mut u8 {
-        todo!()
-    }
-
-    pub fn rom1(&mut self, addr: u16) -> &mut u8 {
-        todo!()
-    }
-
     pub fn vram_direct_read(&self, addr: u16) -> u8 {
         self.vram[self.vram_banking.translate(addr)]
     }
 
-    pub fn vram0_read(&self, addr: u16) -> u8 {
-        self.vram[addr as usize - 0x8000]
+    pub fn vram0(&self, addr: u16) -> u8 {
+        self.vram[addr as usize & (VRAM_BANK_SIZE - 1)]
     }
 
-    pub fn vram1_read(&self, addr: u16) -> u8 {
-        self.vram[(8 * 1024) | (addr as usize - 0x8000)]
-    }
-
-    pub fn sram(&mut self, addr: u16) -> &mut u8 {
-        todo!()
-    }
-
-    pub fn wram0(&mut self, addr: u16) -> &mut u8 {
-        todo!()
-    }
-
-    pub fn wram1(&mut self, addr: u16) -> &mut u8 {
-        todo!()
+    pub fn vram1(&self, addr: u16) -> u8 {
+        self.vram[(VRAM_BANK_SIZE) | (addr as usize & (VRAM_BANK_SIZE - 1))]
     }
 
     pub fn oam_direct_read(&self, addr: u16) -> u8 {
@@ -254,8 +234,12 @@ impl Bus {
         self.oam[addr as usize - 0xfe00] = val;
     }
 
-    pub fn hram(&mut self, addr: u16) -> &mut u8 {
-        todo!()
+    pub fn hram_read(&self, addr: u16) -> u8 {
+        self.hram[addr as usize - 0xff80]
+    }
+
+    pub fn hram_write(&mut self, addr: u16, val: u8) {
+        self.hram[addr as usize - 0xff80] = val;
     }
 }
 
@@ -270,13 +254,13 @@ impl GbEmulator {
             Handler::OpenBus => 0xff,
             Handler::Vram => bus.vram_direct_read(addr),
             Handler::Sram | Handler::SramReadOnly => bus.sram[bus.sram_banking.translate(addr)],
-            Handler::Wram0 => bus.wram[addr as usize - WRAM0_START as usize],
+            Handler::Wram0 => bus.wram[addr as usize & (WRAM_BANK_SIZE - 1)],
             Handler::Wram1 => bus.wram[bus.wram_banking.translate(addr)],
             Handler::Mbc2Ram => bus.sram[addr as usize % 512],
             Handler::IO => 0xff,
             Handler::HramOnly => {
                 if matches!(addr, 0xff80..=0xfffe) {
-                    bus.hram[addr as usize - 0xff80]
+                    bus.hram_read(addr)
                 } else {
                     0xff
                 }
@@ -311,12 +295,12 @@ impl GbEmulator {
             }
             Handler::Sram | Handler::SramReadOnly => bus.sram[bus.sram_banking.translate(addr)],
             Handler::Mbc2Ram => bus.sram[addr as usize % 512],
-            Handler::Wram0 => bus.wram[addr as usize - WRAM0_START as usize],
+            Handler::Wram0 => bus.wram[addr as usize & (WRAM_BANK_SIZE - 1)],
             Handler::Wram1 => bus.wram[bus.wram_banking.translate(addr)],
             Handler::IO => self.io_read(addr),
             Handler::HramOnly => {
                 if matches!(addr, 0xff80..=0xfffe) {
-                    bus.hram[addr as usize - 0xff80]
+                    bus.hram_read(addr)
                 } else {
                     0xff
                 }
@@ -344,12 +328,12 @@ impl GbEmulator {
                 }
             }
             Handler::Sram => bus.sram[bus.sram_banking.translate(addr)] = val,
-            Handler::Wram0 => bus.wram[addr as usize - WRAM0_START as usize] = val,
+            Handler::Wram0 => bus.wram[addr as usize & (WRAM_BANK_SIZE - 1)] = val,
             Handler::Wram1 => bus.wram[bus.wram_banking.translate(addr)] = val,
             Handler::IO => self.io_write(addr, val),
             Handler::HramOnly => {
                 if matches!(addr, 0xff80..=0xfffe) {
-                    bus.hram[addr as usize - 0xff80] = val;
+                    bus.hram_write(addr, val);
                 }
             }
 
@@ -369,7 +353,7 @@ impl GbEmulator {
             };
         } else if 0xff80 <= addr && addr <= 0xfffe {
             // HRAM
-            return self.bus.hram[addr as usize - 0xff80];
+            return self.bus.hram_read(addr);
         }
 
         match addr {
@@ -425,6 +409,46 @@ impl GbEmulator {
                 0xff
             }
 
+            0xff68 => {
+                if self.is_cgb() {
+                    self.ppu.bgpi.into_bits()
+                } else {
+                    0xff
+                }
+            }
+
+            0xff69 => {
+                if self.is_cgb() {
+                    if self.ppu.stat.mode() != ppu::Mode::Drawing {
+                        self.ppu.bg_palettes.0[self.ppu.bgpi.address() as usize]
+                    } else {
+                        0xff
+                    }
+                } else {
+                    0xff
+                }
+            }
+
+            0xff6a => {
+                if self.is_cgb() {
+                    self.ppu.obpi.into_bits()
+                } else {
+                    0xff
+                }
+            }
+
+            0xff6b => {
+                if self.is_cgb() {
+                    if self.ppu.stat.mode() != ppu::Mode::Drawing {
+                        self.ppu.obj_palettes.0[self.ppu.obpi.address() as usize]
+                    } else {
+                        0xff
+                    }
+                } else {
+                    0xff
+                }
+            }
+
             0xff6c => self.sys.priority_mode as u8 | !1,
 
             0xff70 => {
@@ -450,7 +474,7 @@ impl GbEmulator {
             return;
         } else if 0xff80 <= addr && addr <= 0xfffe {
             // HRAM
-            self.bus.hram[addr as usize - 0xff80] = val;
+            self.bus.hram_write(addr, val);
             return;
         }
 
@@ -535,10 +559,51 @@ impl GbEmulator {
                 // TODO: infrared communication
             }
 
+            0xff68 => {
+                if self.is_cgb() {
+                    self.ppu.bgpi = ppu::PaletteIdx::from_bits_with_defaults(val);
+                }
+            }
+
+            0xff69 => {
+                if self.is_cgb() {
+                    let pal_addr = self.ppu.bgpi.address();
+                    if self.ppu.stat.mode() != ppu::Mode::Drawing {
+                        self.ppu.bg_palettes.0[pal_addr as usize] = val;
+                    }
+
+                    // BGPI’s “address” field is automatically incremented (wrapping around from 63 back to 0) after each write to this register, even if the write fails due to CRAM being inaccessible
+                    if self.ppu.bgpi.auto_incr() {
+                        self.ppu.bgpi.set_address(pal_addr + 1);
+                    }
+                }
+            }
+
+            0xff6a => {
+                if self.is_cgb() {
+                    self.ppu.obpi = ppu::PaletteIdx::from_bits_with_defaults(val);
+                }
+            }
+
+            0xff6b => {
+                if self.is_cgb() {
+                    let pal_addr = self.ppu.obpi.address();
+                    if self.ppu.stat.mode() != ppu::Mode::Drawing {
+                        self.ppu.obj_palettes.0[pal_addr as usize] = val;
+                    }
+
+                    // BGPI’s “address” field is automatically incremented (wrapping around from 63 back to 0) after each write to this register, even if the write fails due to CRAM being inaccessible
+                    if self.ppu.bgpi.auto_incr() {
+                        self.ppu.bgpi.set_address(pal_addr + 1);
+                    }
+                }
+            }
+
             0xff6c => {
                 if self.bus.boot_sector1.is_some() {
                     // only cgb bios writes here
-                    self.sys.compat_mode = val & 1 != 0;
+                    self.sys.priority_mode = val & 1 != 0;
+                    println!("PRIORITY MODE: {}", self.sys.priority_mode);
                 }
             }
 
