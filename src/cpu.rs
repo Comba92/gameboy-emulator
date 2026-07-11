@@ -124,6 +124,7 @@ impl GbEmulator {
         self.timer_step();
         self.serial_step();
         self.oam_dma_step();
+        self.apu_step();
 
         self.ppu_step();
         self.ppu_step();

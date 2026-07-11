@@ -1,11 +1,11 @@
 use crate::{
     bus::Bus,
-    emu::{FRAMEBUF_SIZE, GbEmulator, SCREEN_WIDTH},
+    emu::{FRAMEBUF_SIZE, GbEmulator, SCREEN_HEIGHT, SCREEN_WIDTH},
 };
 use bitfields::{bitfield, bitflag};
 use std::collections::{HashMap, VecDeque};
 
-pub const DMG_PALETTE_RGB: [(u8, u8, u8); 4] =
+pub const DMG_PALETTE_RGB888: [(u8, u8, u8); 4] =
     [(155, 188, 15), (139, 172, 15), (48, 98, 48), (15, 56, 15)];
 
 fn from_rgb888_to_rgb555((r8, g8, b8): (u8, u8, u8)) -> (u8, u8) {
@@ -15,7 +15,7 @@ fn from_rgb888_to_rgb555((r8, g8, b8): (u8, u8, u8)) -> (u8, u8) {
     let g5 = (g8 >> 3) & 0x1f;
     let b5 = (b8 >> 3) & 0x1f;
 
-    let res = (r5 << 10) | (g5 << 5) | b5;
+    let res = (b5 << 10) | (g5 << 5) | r5;
     (res as u8, (res >> 8) as u8)
 }
 
@@ -174,7 +174,7 @@ impl PaletteRam {
         let mut res = [0; _];
 
         if !is_cgb {
-            for (idx, color) in DMG_PALETTE_RGB.iter().copied().enumerate() {
+            for (idx, color) in DMG_PALETTE_RGB888.iter().copied().enumerate() {
                 let (lo, hi) = from_rgb888_to_rgb555(color);
 
                 res[2 * idx + 0] = lo;
@@ -250,8 +250,57 @@ impl Ppu {
         }
     }
 
+    // TODO: cache this
     pub fn obj_size(&self) -> u8 {
         if self.lcdc.obj_size() { 16 } else { 8 }
+    }
+
+    fn palette_read(&mut self, bg: bool) -> u8 {
+        let (ram, pi) = if bg {
+            (&self.bg_palettes, self.bgpi)
+        } else {
+            (&self.obj_palettes, self.obpi)
+        };
+
+        if self.stat.mode() != Mode::Drawing {
+            ram.0[pi.address() as usize]
+        } else {
+            0xff
+        }
+    }
+
+    pub fn bg_palette_read(&mut self) -> u8 {
+        self.palette_read(true)
+    }
+
+    pub fn obj_palette_read(&mut self) -> u8 {
+        self.palette_read(false)
+    }
+
+    pub fn palette_write(&mut self, val: u8, bg: bool) {
+        let (ram, pi) = if bg {
+            (&mut self.bg_palettes, &mut self.bgpi)
+        } else {
+            (&mut self.obj_palettes, &mut self.obpi)
+        };
+
+        let pal_addr = pi.address();
+        if self.stat.mode() != Mode::Drawing {
+            ram.0[pal_addr as usize] = val;
+        }
+
+        // BGPI’s “address” field is automatically incremented (wrapping around from 63 back to 0) after each write to this register, even if the write fails due to CRAM being inaccessible
+        if pi.auto_incr() {
+            pi.set_address(pal_addr + 1);
+        }
+    }
+
+    pub fn bg_palette_write(&mut self, val: u8) {
+        self.palette_write(val, true)
+    }
+
+    pub fn obj_palette_write(&mut self, val: u8) {
+        self.palette_write(val, false)
     }
 }
 
@@ -287,6 +336,15 @@ impl GbEmulator {
             ppu.obj_fifo.clear();
             ppu.obj_buf.clear();
             ppu.obj_pos_x.clear();
+
+            for _ in 0..SCREEN_WIDTH * SCREEN_HEIGHT {
+                self.push_pixel(0, |p| &p.bg_palettes);
+            }
+            self.ppu.pixel_idx = 0;
+            std::mem::swap(
+                &mut self.output.videobuf_back,
+                &mut self.output.videobuf_view,
+            );
         }
     }
 
@@ -686,13 +744,6 @@ impl GbEmulator {
     pub fn ppu_step(&mut self) {
         let ppu = &mut self.ppu;
         if !ppu.lcdc.lcd_enable() {
-            ppu.pixel_idx += 4;
-            if ppu.pixel_idx >= FRAMEBUF_SIZE {
-                ppu.pixel_idx = 0;
-                self.output.frame_ready = true;
-            } else {
-                self.push_pixel(0, |p| &p.bg_palettes);
-            }
             return;
         }
 

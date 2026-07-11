@@ -1,10 +1,11 @@
 use crate::{
+    apu::Apu,
     bus::{Bus, Mbc},
     cpu::CpuSm83,
     dma::{Hdma, OamDma},
     joypad::Joypad,
-    ppu::{DMG_PALETTE_RGB, Ppu},
-    rom::{self, Cart, RomData, is_valid_bios},
+    ppu::{DMG_PALETTE_RGB888, Ppu},
+    rom::{Cart, RomData, is_valid_bios},
     serial::Serial,
     sys::System,
     timer::Timer,
@@ -29,6 +30,7 @@ pub struct GbEmulator {
     pub cpu: CpuSm83,
     pub(crate) bus: Bus,
     pub(crate) ppu: Ppu,
+    pub(crate) apu: Apu,
     pub(crate) mbc: Mbc,
     pub(crate) dma: OamDma,
     pub(crate) hdma: Hdma,
@@ -46,6 +48,7 @@ impl GbEmulator {
             cpu: CpuSm83::default(),
             bus: Bus::with_ram_64kb(),
             ppu: Ppu::new(false),
+            apu: Apu::new(),
             mbc: Mbc::None,
             timer: Timer::new(),
             serial: Serial::new(),
@@ -84,6 +87,7 @@ impl GbEmulator {
             bus,
             mbc,
             ppu: Ppu::new(is_cgb_model),
+            apu: Apu::new(),
             timer: Timer::new(),
             serial: Serial::new(),
             dma: OamDma::new(),
@@ -126,6 +130,10 @@ impl GbEmulator {
         &self.output.videobuf_view.0
     }
 
+    pub fn audio_queued(&self) -> usize {
+        self.output.audiobuf.queued()
+    }
+
     pub fn get_tileset_rgba(&self, buf: &mut [u8]) {
         for i in 0..384 {
             let x = i % 32;
@@ -145,7 +153,7 @@ impl GbEmulator {
                     let px = fx + 7 - bit;
                     let py = fy + row;
 
-                    let color = &DMG_PALETTE_RGB[color_idx as usize];
+                    let color = &DMG_PALETTE_RGB888[color_idx as usize];
                     let idx = (py * 256 as usize + px) * 4;
                     buf[idx + 0] = color.0;
                     buf[idx + 1] = color.1;
@@ -177,7 +185,7 @@ impl GbEmulator {
                     let px = fx + 7 - bit;
                     let py = fy + row;
 
-                    let color = &DMG_PALETTE_RGB[color_idx as usize];
+                    let color = &DMG_PALETTE_RGB888[color_idx as usize];
                     let idx = (py * 256 as usize + px) * 4;
                     buf[idx + 0] = color.0;
                     buf[idx + 1] = color.1;
@@ -197,6 +205,14 @@ pub(crate) struct GbOutput {
     pub(crate) videobuf_view: Box<Framebuf>,
     pub(crate) audiobuf: RingBuffer<f32>,
     pub(crate) resampler: AvgResampler,
+}
+impl GbOutput {
+    pub fn new() -> Self {
+        Self {
+            audiobuf: RingBuffer::new(8192 * 2),
+            ..Default::default()
+        }
+    }
 }
 
 pub(crate) struct Framebuf(pub [u8; FRAMEBUF_SIZE]);

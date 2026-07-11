@@ -1,4 +1,5 @@
 use crate::{
+    apu,
     emu::GbEmulator,
     ppu,
     rom::{self, Cart, RomData},
@@ -365,6 +366,20 @@ impl GbEmulator {
             0xff07 => self.timer.tac.into_bits(),
 
             0xff0f => self.bus.intf.into_bits(),
+
+            0xff24 => self.apu.vol.into_bits(),
+            0xff25 => self.apu.pan.into_bits(),
+            0xff26 => self.apu.nr52_read(),
+
+            0xff10 => self.apu.p1.sweep.into_bits(),
+            0xff11 => self.apu.nr11_read(|a| &a.p1),
+            0xff12 => self.apu.p1.env.into_bits(),
+            0xff14 => self.apu.nr14_read(|a| &a.p1),
+
+            0xff16 => self.apu.nr11_read(|a| &a.p2),
+            0xff17 => self.apu.p2.env.into_bits(),
+            0xff19 => self.apu.nr14_read(|a| &a.p2),
+
             0xff40 => self.ppu.lcdc.into_bits(),
             0xff41 => self.ppu.stat.into_bits(),
             0xff42 => self.ppu.scy,
@@ -418,11 +433,7 @@ impl GbEmulator {
 
             0xff69 => {
                 if self.is_cgb() {
-                    if self.ppu.stat.mode() != ppu::Mode::Drawing {
-                        self.ppu.bg_palettes.0[self.ppu.bgpi.address() as usize]
-                    } else {
-                        0xff
-                    }
+                    self.ppu.bg_palette_read()
                 } else {
                     0xff
                 }
@@ -438,11 +449,7 @@ impl GbEmulator {
 
             0xff6b => {
                 if self.is_cgb() {
-                    if self.ppu.stat.mode() != ppu::Mode::Drawing {
-                        self.ppu.obj_palettes.0[self.ppu.obpi.address() as usize]
-                    } else {
-                        0xff
-                    }
+                    self.ppu.obj_palette_read()
                 } else {
                     0xff
                 }
@@ -494,6 +501,29 @@ impl GbEmulator {
             0xff07 => self.timer.tac = timer::Ctrl::from_bits_with_defaults(val),
 
             0xff0f => self.bus.intf = IntFlags::from_bits_with_defaults(val),
+
+            0xff10 => self.apu.nr10_write(val, |a| &mut a.p1),
+            0xff11 => self.apu.nr11_write(val, |a| &mut a.p1),
+            0xff12 => self.apu.nr12_write(val, |a| &mut a.p1),
+            0xff13 => self.apu.nr13_write(val, |a| &mut a.p1),
+            0xff14 => self.apu.nr14_write(val, |a| &mut a.p1),
+
+            0xff16 => self.apu.nr11_write(val, |a| &mut a.p2),
+            0xff17 => self.apu.nr12_write(val, |a| &mut a.p2),
+            0xff18 => self.apu.nr13_write(val, |a| &mut a.p2),
+            0xff19 => self.apu.nr14_write(val, |a| &mut a.p2),
+
+            0xff24 => {
+                if self.apu.master_enable {
+                    self.apu.vol = apu::Volume::from_bits_with_defaults(val);
+                }
+            }
+            0xff25 => {
+                if self.apu.master_enable {
+                    self.apu.pan = apu::Panning::from_bits_with_defaults(val);
+                }
+            }
+            0xff26 => self.apu.nr52_write(val),
 
             0xff40 => self.lcdc_write(val),
             0xff41 => {
@@ -569,15 +599,7 @@ impl GbEmulator {
 
             0xff69 => {
                 if self.is_cgb() {
-                    let pal_addr = self.ppu.bgpi.address();
-                    if self.ppu.stat.mode() != ppu::Mode::Drawing {
-                        self.ppu.bg_palettes.0[pal_addr as usize] = val;
-                    }
-
-                    // BGPI’s “address” field is automatically incremented (wrapping around from 63 back to 0) after each write to this register, even if the write fails due to CRAM being inaccessible
-                    if self.ppu.bgpi.auto_incr() {
-                        self.ppu.bgpi.set_address(pal_addr + 1);
-                    }
+                    self.ppu.bg_palette_write(val);
                 }
             }
 
@@ -589,15 +611,7 @@ impl GbEmulator {
 
             0xff6b => {
                 if self.is_cgb() {
-                    let pal_addr = self.ppu.obpi.address();
-                    if self.ppu.stat.mode() != ppu::Mode::Drawing {
-                        self.ppu.obj_palettes.0[pal_addr as usize] = val;
-                    }
-
-                    // OBPI’s “address” field is automatically incremented (wrapping around from 63 back to 0) after each write to this register, even if the write fails due to CRAM being inaccessible
-                    if self.ppu.obpi.auto_incr() {
-                        self.ppu.obpi.set_address(pal_addr + 1);
-                    }
+                    self.ppu.obj_palette_write(val);
                 }
             }
 

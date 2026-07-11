@@ -76,8 +76,6 @@ mod timer {
         pub tima: u8,
         pub tma: u8,
         pub tac: Ctrl,
-
-        pub tima_counter: u32,
     }
 
     impl Timer {
@@ -87,7 +85,6 @@ mod timer {
                 tima: 0,
                 tma: 0,
                 tac: Ctrl::new(),
-                tima_counter: 0,
             }
         }
     }
@@ -95,31 +92,25 @@ mod timer {
 
 impl GbEmulator {
     pub(crate) fn timer_step(&mut self) {
-        // 4194304Hz / 16384Hz = 256 Tcycles
-        // Same in Double speed: 8388608Hz / 32768Hz = 256 Tcycles
+        // 4194304Hz / 16384Hz = 256 Tcycles = 256 / 4 = 64 Mccyles
+        // Same in Double speed: 8388608Hz / 32768Hz = 256 Tcycles = 64 Mcycles
         // Div is in reality a 16bit counter, incremented every Mcycle.
-        // Only the upper part is visibile, hence why it increases every 256 cycles!
+        // Only the upper part is visibile, hence why it increases every 256 Tcycles!
         let cycles = self.cpu.mcycles;
 
         let timer = &mut self.timer;
-        if cycles % 256 == 0 {
+        if cycles % 64 == 0 {
             timer.div = timer.div.wrapping_add(1);
         }
 
         let tima_inc = match timer.tac.clock_select() {
-            timer::Mode::M256 => 4096,
-            timer::Mode::M4 => 262144,
-            timer::Mode::M16 => 65536,
-            timer::Mode::M64 => 16384,
+            timer::Mode::M256 => 256,
+            timer::Mode::M4 => 4,
+            timer::Mode::M16 => 16,
+            timer::Mode::M64 => 64,
         };
 
-        // TODO: cache clock speed
-        let tima_clock_target = self.clock_rate() as u32 / tima_inc;
-        let timer = &mut self.timer;
-
-        if timer.tima_counter >= tima_clock_target {
-            timer.tima_counter -= tima_clock_target;
-
+        if cycles % tima_inc == 0 {
             if timer.tac.tima_enabled() {
                 let (tima, ovfl) = timer.tima.overflowing_add(1);
                 self.timer.tima = if ovfl {
@@ -130,7 +121,6 @@ impl GbEmulator {
                 };
             }
         }
-        self.timer.tima_counter += 4;
     }
 }
 
@@ -151,7 +141,6 @@ mod serial {
         pub ctrl: Ctrl,
         pub out_buffer: Vec<u8>,
 
-        pub clock_count: u32,
         pub sent: u8,
     }
     impl Serial {
@@ -160,7 +149,6 @@ mod serial {
                 data: 0xff,
                 ctrl: Ctrl::new(),
                 out_buffer: Vec::new(),
-                clock_count: 0,
                 sent: 0,
             }
         }
@@ -169,22 +157,18 @@ mod serial {
 
 impl GbEmulator {
     pub(crate) fn serial_step(&mut self) {
-        // TODO: cache clock speed...
-        let clock_target = if self.is_cgb() {
-            let hz = if self.serial.ctrl.clock_speed() {
-                262144
-            } else {
-                8192
-            };
-            emu::CBG_CLOCK_RATE as u32 / hz
-        } else {
-            emu::DMG_CLOCK_RATE as u32 / 8192
-        };
+        let cycles = self.cpu.mcycles;
         let serial = &mut self.serial;
 
         if serial.ctrl.clock_master() {
-            if serial.clock_count >= clock_target {
-                serial.clock_count -= clock_target;
+            // 4194304Hz / 8192Hz = 512 Tcycles = 512 / 4 = 128 Mccyles
+            // Same in Double speed: 8388608Hz / 16384Hz = 512 Tcycles = 128 Mcycles
+            // or
+            // 4194304Hz / 262144Hz = 16 Tcycles = 16 / 4 = 4 Mccyles
+
+            let freq = if serial.ctrl.clock_speed() { 4 } else { 128 };
+
+            if cycles % freq == 0 {
                 serial.sent += 1;
                 serial.data = (serial.data << 1) | 1;
 
@@ -194,7 +178,6 @@ impl GbEmulator {
                     self.bus.intf.set_serial(true);
                 }
             }
-            serial.clock_count += 4; // 1 mcycle is 4 tcycles
         }
     }
 }
@@ -550,8 +533,9 @@ mod utils {
     }
 
     pub struct AvgResampler {
-        sample_avg: f32,
-        sample_count: usize,
+        left_sample_avg: f32,
+        right_sample_avg: f32,
+        samples_count: usize,
 
         sample_timer: f64,
         input_rate: f64,
@@ -567,8 +551,10 @@ mod utils {
     impl AvgResampler {
         pub fn new(input_rate: f64, output_rate: f64) -> Self {
             Self {
-                sample_avg: 0.0,
-                sample_count: 0,
+                left_sample_avg: 0.0,
+                right_sample_avg: 0.0,
+                samples_count: 0,
+
                 sample_timer: 0.0,
                 input_rate,
                 output_rate,
@@ -578,8 +564,10 @@ mod utils {
 
         pub fn clear(&self) -> Self {
             Self {
-                sample_avg: 0.0,
-                sample_count: 0,
+                left_sample_avg: 0.0,
+                right_sample_avg: 0.0,
+                samples_count: 0,
+
                 sample_timer: 0.0,
                 input_rate: self.input_rate,
                 output_rate: self.output_rate,
@@ -593,19 +581,23 @@ mod utils {
             self.cycles_per_sample = input_rate / output_rate;
         }
 
-        pub fn add_sample(&mut self, sample: f32) -> Option<f32> {
-            self.sample_avg += sample;
-            self.sample_count += 1;
+        pub fn add_sample(&mut self, left: f32, right: f32) -> Option<(f32, f32)> {
+            self.left_sample_avg += left;
+            self.right_sample_avg += right;
+            self.samples_count += 1;
+
             self.sample_timer += 1.0;
 
             if self.sample_timer >= self.cycles_per_sample {
                 self.sample_timer -= self.cycles_per_sample;
-                let res = self.sample_avg / self.sample_count as f32;
+                let left = self.left_sample_avg / self.samples_count as f32;
+                let right = self.right_sample_avg / self.samples_count as f32;
 
-                self.sample_avg = 0.0;
-                self.sample_count = 0;
+                self.left_sample_avg = 0.0;
+                self.right_sample_avg = 0.0;
+                self.samples_count = 0;
 
-                Some(res)
+                Some((left, right))
             } else {
                 None
             }
