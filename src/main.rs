@@ -57,7 +57,7 @@ fn main() {
     let emu = GbEmulator::builder()
         .with_rom_file(&rom_path)
         .with_bios_file(Some(&bios_path))
-        .skip_boot(true)
+        // .skip_boot(true)
         .build()
         .unwrap();
 

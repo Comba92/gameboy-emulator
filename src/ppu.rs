@@ -5,26 +5,26 @@ use crate::{
 use bitfields::{bitfield, bitflag};
 use std::collections::{HashMap, VecDeque};
 
-pub const DMG_PALETTE: [(u8, u8, u8); 4] =
+pub const DMG_PALETTE_RGB: [(u8, u8, u8); 4] =
     [(155, 188, 15), (139, 172, 15), (48, 98, 48), (15, 56, 15)];
 
 fn from_rgb888_to_rgb555((r8, g8, b8): (u8, u8, u8)) -> (u8, u8) {
     let (r8, g8, b8) = (r8 as u32, g8 as u32, b8 as u32);
 
-    let r5 = (r8 >> 3) << 10;
-    let g5 = (g8 >> 3) << 5;
-    let b5 = b8 >> 3;
+    let r5 = (r8 >> 3) & 0x1f;
+    let g5 = (g8 >> 3) & 0x1f;
+    let b5 = (b8 >> 3) & 0x1f;
 
-    let res = r5 | g5 | b5;
+    let res = (r5 << 10) | (g5 << 5) | b5;
     (res as u8, (res >> 8) as u8)
 }
 
 fn from_rgb555_to_rgb888(color_lo: u8, color_hi: u8) -> (u8, u8, u8) {
     let color16 = ((color_hi as u32) << 8) | (color_lo as u32);
 
-    let r5 = color16 & 0x1f;
+    let r5 = (color16 >> 10) & 0x1f;
     let g5 = (color16 >> 5) & 0x1f;
-    let b5 = (color16 >> 10) & 0x1f;
+    let b5 = color16 & 0x1f;
 
     let r8 = r5 * 255 / 31;
     let g8 = g5 * 255 / 31;
@@ -174,7 +174,7 @@ impl PaletteRam {
         let mut res = [0; _];
 
         if !is_cgb {
-            for (idx, color) in DMG_PALETTE.iter().copied().enumerate() {
+            for (idx, color) in DMG_PALETTE_RGB.iter().copied().enumerate() {
                 let (lo, hi) = from_rgb888_to_rgb555(color);
 
                 res[2 * idx + 0] = lo;
@@ -189,7 +189,7 @@ impl PaletteRam {
         let mut res = [0; _];
 
         if !is_cgb {
-            for (idx, color) in DMG_PALETTE.iter().copied().enumerate() {
+            for (idx, color) in DMG_PALETTE_RGB.iter().copied().enumerate() {
                 let (lo, hi) = from_rgb888_to_rgb555(color);
 
                 // obj palette 0
@@ -206,6 +206,7 @@ impl PaletteRam {
     }
 
     pub fn rgba888(&self, idx: u8) -> (u8, u8, u8) {
+        let idx = idx * 2;
         from_rgb555_to_rgb888(self.0[idx as usize], self.0[idx as usize | 1])
     }
 }
@@ -261,7 +262,7 @@ pub struct Ppu {
 }
 
 impl Ppu {
-    pub fn new() -> Self {
+    pub fn new(is_cgb_model: bool) -> Self {
         Self {
             bg_palettes: PaletteRam::new_bg(false),
             obj_palettes: PaletteRam::new_obj(false),
@@ -387,6 +388,7 @@ impl GbEmulator {
     }
 
     fn fetch_obj_tile(&mut self, obj_idx: u8) -> (u8, u8) {
+        let is_cgb = self.is_cgb();
         let ppu = &self.ppu;
 
         let obj = &ppu.obj_buf[obj_idx as usize];
@@ -406,7 +408,7 @@ impl GbEmulator {
         let tile_addr = tile_start | offset;
         let flip_x = obj.attr.flip_x();
 
-        let tile_fetch = if obj.attr.bank() {
+        let tile_fetch = if obj.attr.bank() && is_cgb {
             Bus::vram1
         } else {
             Bus::vram0
@@ -595,7 +597,7 @@ impl GbEmulator {
     }
 
     fn push_pixel(&mut self, idx: u8, pal: fn(&Ppu) -> &PaletteRam) {
-        let color = pal(&self.ppu).rgba888(2 * idx);
+        let color = pal(&self.ppu).rgba888(idx);
 
         self.output.videobuf_back.0[self.ppu.pixel_idx + 0] = color.0;
         self.output.videobuf_back.0[self.ppu.pixel_idx + 1] = color.1;

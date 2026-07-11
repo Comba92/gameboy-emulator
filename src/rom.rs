@@ -27,11 +27,12 @@ impl Cart {
 }
 
 #[derive(Default, Debug, Clone, PartialEq)]
+#[allow(non_camel_case_types)]
 pub enum ConsoleMode {
     #[default]
     DMG,
-    CGBCompat,
-    CGBOnly,
+    CGB_Compat,
+    CGB_Only,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -67,7 +68,7 @@ pub struct RomData {
 impl RomData {
     pub fn is_cgb(&self) -> bool {
         // When using any CGB registers (including those in the Video/Link chapters), you must first unlock CGB features by changing byte 0143 in the cartridge header.
-        self.mode == ConsoleMode::CGBOnly
+        self.mode == ConsoleMode::CGB_Only
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, &'static str> {
@@ -76,14 +77,15 @@ impl RomData {
         }
 
         let mut header = RomData::default();
-        header.title = String::from_utf8_lossy(&bytes[0x134..0x144])
-            .trim()
-            .trim_matches(|c: char| c.is_control())
-            .to_string();
+        header.title = bytes[0x134..0x144]
+            .iter()
+            .take_while(|c| c.is_ascii_graphic() || c.is_ascii_whitespace())
+            .map(|c| *c as char)
+            .collect::<String>();
 
         header.mode = match bytes[0x143] {
-            0x80 => ConsoleMode::CGBCompat,
-            0xc0 => ConsoleMode::CGBOnly,
+            0x80 => ConsoleMode::CGB_Compat,
+            0xc0 => ConsoleMode::CGB_Only,
             _ => ConsoleMode::DMG,
         };
 
@@ -120,11 +122,17 @@ impl RomData {
         header.sensor = [0x22].contains(&header.mbc);
 
         header.revision = bytes[0x14c];
-        header.mbc_name = MBC_NAMES
-            .iter()
-            .find(|x| x.0 == header.mbc)
-            .map(|x| x.1)
-            .unwrap_or("Unknown");
+
+        // special case: M161
+        header.mbc_name = if header.title.contains("TETRIS SET") {
+            "M161"
+        } else {
+            MBC_NAMES
+                .iter()
+                .find(|x| x.0 == header.mbc)
+                .map(|x| x.1)
+                .unwrap_or("Unknown")
+        };
 
         println!("{header:?}");
 

@@ -9,8 +9,6 @@ mod rom;
 mod clock {
     use bitfields::bitfield;
 
-    use crate::rom;
-
     pub const DMG_CLOCK_RATE: usize = 4194304;
     pub const CBG_CLOCK_RATE: usize = 2 * DMG_CLOCK_RATE;
 
@@ -23,16 +21,19 @@ mod clock {
     }
 
     pub struct System {
-        pub console_mode: rom::ConsoleMode,
+        pub is_cgb_model: bool,
+        pub is_cgb_game: bool,
+
         pub compat_mode: bool,
         pub priority_mode: bool,
         pub clock: Speed,
     }
 
     impl System {
-        pub fn new() -> Self {
+        pub fn new(is_cgb_model: bool) -> Self {
             Self {
-                console_mode: rom::ConsoleMode::DMG,
+                is_cgb_model,
+                is_cgb_game: is_cgb_model, // if cgb model, boot rom has to access the cgb registers.
                 compat_mode: false,
                 priority_mode: false,
                 clock: Speed::new(),

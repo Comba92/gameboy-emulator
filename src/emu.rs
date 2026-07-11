@@ -4,7 +4,7 @@ use crate::{
     cpu::CpuSm83,
     dma::{Hdma, OamDma},
     joypad::Joypad,
-    ppu::{DMG_PALETTE, Ppu},
+    ppu::{DMG_PALETTE_RGB, Ppu},
     rom::{self, Cart, RomData, is_valid_bios},
     serial::Serial,
     timer::Timer,
@@ -41,14 +41,14 @@ impl GbEmulator {
         Self {
             cpu: CpuSm83::default(),
             bus: Bus::with_ram_64kb(),
-            ppu: Ppu::new(),
+            ppu: Ppu::new(false),
             mbc: Mbc::None,
             timer: Timer::new(),
             serial: Serial::new(),
             dma: OamDma::new(),
             hdma: Hdma::new(),
             joy: Joypad::new(),
-            sys: System::new(),
+            sys: System::new(false),
             output: GbOutput::default(),
         }
     }
@@ -70,6 +70,8 @@ impl GbEmulator {
             CpuSm83::new_bootless_dmg()
         };
 
+        let is_cgb_model = bios.as_ref().is_some_and(|bytes| bytes.len() > 0x100);
+
         let mut bus = Bus::new(game, bios);
         let mbc = Mbc::new(&mut bus)?;
 
@@ -77,13 +79,13 @@ impl GbEmulator {
             cpu,
             bus,
             mbc,
-            ppu: Ppu::new(),
+            ppu: Ppu::new(is_cgb_model),
             timer: Timer::new(),
             serial: Serial::new(),
             dma: OamDma::new(),
             hdma: Hdma::new(),
             joy: Joypad::new(),
-            sys: System::new(),
+            sys: System::new(is_cgb_model),
             output: GbOutput::default(),
         })
     }
@@ -101,8 +103,7 @@ impl GbEmulator {
     }
 
     pub fn is_cgb(&self) -> bool {
-        // if in CGB Compatibility mode, only the CGB boot can access the CGB registers!
-        self.rom_info().mode == rom::ConsoleMode::CGBOnly || self.bus.boot_sector1.is_some()
+        self.sys.is_cgb_game
     }
 
     pub fn step(&mut self) {
@@ -140,7 +141,7 @@ impl GbEmulator {
                     let px = fx + 7 - bit;
                     let py = fy + row;
 
-                    let color = &DMG_PALETTE[color_idx as usize];
+                    let color = &DMG_PALETTE_RGB[color_idx as usize];
                     let idx = (py * 256 as usize + px) * 4;
                     buf[idx + 0] = color.0;
                     buf[idx + 1] = color.1;
@@ -172,7 +173,7 @@ impl GbEmulator {
                     let px = fx + 7 - bit;
                     let py = fy + row;
 
-                    let color = &DMG_PALETTE[color_idx as usize];
+                    let color = &DMG_PALETTE_RGB[color_idx as usize];
                     let idx = (py * 256 as usize + px) * 4;
                     buf[idx + 0] = color.0;
                     buf[idx + 1] = color.1;

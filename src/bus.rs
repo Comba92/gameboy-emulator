@@ -132,8 +132,7 @@ impl Bus {
 
     pub fn new(mut cart: Cart, bios: Option<Vec<u8>>) -> Self {
         // if we have a cgb boot, it means we NEED to run from a CGB
-        let is_cgb_booted =
-            bios.as_ref().is_some_and(|bytes| bytes.len() > 0x100) || cart.header.is_cgb();
+        let is_cgb_booted = bios.as_ref().is_some_and(|bytes| bytes.len() > 0x100);
 
         let vram_size = if is_cgb_booted {
             VRAM_BANK_SIZE * 2
@@ -541,6 +540,9 @@ impl GbEmulator {
                     if let Some(boot1) = self.bus.boot_sector1.take() {
                         self.bus.rom[0x200..0x900].copy_from_slice(&boot1);
                     }
+
+                    // now that boot is done, set the mode as header mode
+                    self.sys.is_cgb_game = self.bus.header.is_cgb();
                 }
             }
 
@@ -603,7 +605,6 @@ impl GbEmulator {
                 if self.bus.boot_sector1.is_some() {
                     // only cgb bios writes here
                     self.sys.priority_mode = val & 1 != 0;
-                    println!("PRIORITY MODE: {}", self.sys.priority_mode);
                 }
             }
 
@@ -745,9 +746,13 @@ impl GbEmulator {
                 if addr >= 0x8000 || *bankswitched {
                     return;
                 }
-                self.bus.rom1_banking.map(val as u16);
+                let val = val as u16;
+                self.bus.rom0_banking.map(val << 1);
+                self.bus.rom1_banking.map((val << 1) | 1);
                 *bankswitched = true;
             }
+
+            Mbc::Tama5 => todo!(),
 
             Mbc::HuC1 => {
                 match addr {
@@ -801,6 +806,7 @@ pub enum Mbc {
     Mbc7(Mbc7),
     Mmm01,
     M161(bool),
+    Tama5,
     HuC1,
     HuC3,
 }
@@ -815,28 +821,24 @@ impl Mbc {
                 bus.sram = vec![0x0f; 512].into_boxed_slice();
                 Mbc::Mbc2
             }
-            0x0f..=0x13 => Mbc::Mbc3(Mbc3::default()),
+            0x0f..=0x13 => {
+                // special case, M161
+                if bus.header.mbc_name == "M161" {
+                    Mbc::M161(false)
+                } else {
+                    Mbc::Mbc3(Mbc3::default())
+                }
+            }
             0x19..=0x1e => Mbc::Mbc5(Mbc5::default()),
 
-            // 0x0b | 0x0c | 0x0d => {
-            //     if false {
-            //         // TODO: detect M161
-            //         // maps a single bank to the whole rom address range, ????
-            //         // double check this. might refer only to the usual rom1 banking
-            //         bus.map[..0x8].fill(Handler::Rom1);
-            //         bus.rom1_banking = Banker::new(0x8000, bus.header.rom_size);
-            //         Mbc::M161(false)
-            //     } else {
-            //         Mbc::Mmm01
-            //     }
-            // }
-
+            // 0x0b | 0x0c | 0x0d => Mbc::Mmm01,
             // 0x20 => Mbc::Mbc6,
             0x22 => Mbc::Mbc7(Mbc7::default()),
 
+            // 0xfd => Mbc::Tama5,
             0xfe => Mbc::HuC3,
             0xff => Mbc::HuC1,
-            _ => return Err(format!("mapper {} not implemented", bus.header.mbc)),
+            _ => return Err(format!("mapper {} not implemented", bus.header.mbc_name)),
         };
 
         Ok(res)

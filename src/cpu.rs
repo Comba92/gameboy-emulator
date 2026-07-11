@@ -96,6 +96,7 @@ impl GbEmulator {
                 // we onl have 5 kinds of interrupts!
                 self.cpu.halted = false;
                 self.cpu.ime = false;
+                self.cpu.ei = false;
                 self.bus.intf.set_bit(intr, false);
 
                 self.tick();
