@@ -1,17 +1,21 @@
 use crate::{
     bus::{Bus, Mbc},
-    clock::System,
     cpu::CpuSm83,
     dma::{Hdma, OamDma},
     joypad::Joypad,
     ppu::{DMG_PALETTE_RGB, Ppu},
     rom::{self, Cart, RomData, is_valid_bios},
     serial::Serial,
+    sys::System,
     timer::Timer,
+    utils::{AvgResampler, RingBuffer},
 };
 use std::{io, path::Path};
 
 pub const FRAME_RATE: f32 = 59.73;
+
+pub const DMG_CLOCK_RATE: usize = 4194304;
+pub const CBG_CLOCK_RATE: usize = 2 * DMG_CLOCK_RATE;
 
 pub const SCREEN_WIDTH: isize = 160;
 pub const SCREEN_HEIGHT: isize = 144;
@@ -103,7 +107,7 @@ impl GbEmulator {
     }
 
     pub fn is_cgb(&self) -> bool {
-        self.sys.is_cgb_game
+        self.sys.is_cgb_game && self.sys.is_cgb_model
     }
 
     pub fn step(&mut self) {
@@ -191,6 +195,8 @@ pub(crate) struct GbOutput {
     pub(crate) frame_number: usize,
     pub(crate) videobuf_back: Box<Framebuf>,
     pub(crate) videobuf_view: Box<Framebuf>,
+    pub(crate) audiobuf: RingBuffer<f32>,
+    pub(crate) resampler: AvgResampler,
 }
 
 pub(crate) struct Framebuf(pub [u8; FRAMEBUF_SIZE]);

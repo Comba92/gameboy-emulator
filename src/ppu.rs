@@ -22,9 +22,9 @@ fn from_rgb888_to_rgb555((r8, g8, b8): (u8, u8, u8)) -> (u8, u8) {
 fn from_rgb555_to_rgb888(color_lo: u8, color_hi: u8) -> (u8, u8, u8) {
     let color16 = ((color_hi as u32) << 8) | (color_lo as u32);
 
-    let r5 = (color16 >> 10) & 0x1f;
+    let r5 = color16 & 0x1f;
     let g5 = (color16 >> 5) & 0x1f;
-    let b5 = color16 & 0x1f;
+    let b5 = (color16 >> 10) & 0x1f;
 
     let r8 = r5 * 255 / 31;
     let g8 = g5 * 255 / 31;
@@ -170,7 +170,7 @@ impl Default for PaletteRam {
     }
 }
 impl PaletteRam {
-    pub fn new_bg(is_cgb: bool) -> Self {
+    pub fn new(is_cgb: bool) -> Self {
         let mut res = [0; _];
 
         if !is_cgb {
@@ -179,26 +179,6 @@ impl PaletteRam {
 
                 res[2 * idx + 0] = lo;
                 res[2 * idx + 1] = hi;
-            }
-        }
-
-        Self(res)
-    }
-
-    pub fn new_obj(is_cgb: bool) -> Self {
-        let mut res = [0; _];
-
-        if !is_cgb {
-            for (idx, color) in DMG_PALETTE_RGB.iter().copied().enumerate() {
-                let (lo, hi) = from_rgb888_to_rgb555(color);
-
-                // obj palette 0
-                res[2 * idx + 0] = lo;
-                res[2 * idx + 1] = hi;
-
-                // obj palette 1
-                res[2 * idx + 4 + 0] = lo;
-                res[2 * idx + 4 + 1] = hi;
             }
         }
 
@@ -264,8 +244,8 @@ pub struct Ppu {
 impl Ppu {
     pub fn new(is_cgb_model: bool) -> Self {
         Self {
-            bg_palettes: PaletteRam::new_bg(false),
-            obj_palettes: PaletteRam::new_obj(false),
+            bg_palettes: PaletteRam::new(false),
+            obj_palettes: PaletteRam::new(false),
             ..Default::default()
         }
     }
@@ -317,12 +297,13 @@ impl GbEmulator {
             return;
         }
 
-        let obj_start = 4 * (ppu.dot as usize / 2);
+        let obj_idx = ppu.dot as usize / 2;
+        let obj_start = 4 * obj_idx;
         let obj = &self.bus.oam[obj_start..obj_start + 4];
 
         let y = obj[0];
         if y <= ppu.ly + 16 && ppu.ly + 16 < y + ppu.obj_size() {
-            let obj = Object::new(obj, ppu.obj_buf.len() as u8);
+            let obj = Object::new(obj, obj_idx as u8);
             ppu.obj_buf.push(obj);
         }
     }
@@ -524,6 +505,7 @@ impl GbEmulator {
                     let lo = (tile_lo >> i) & 1;
                     let hi = (tile_hi >> i) & 1;
                     let color = (hi << 1) | lo;
+
                     let new_pixel = FifoPixelBuilder::new()
                         .with_color(color)
                         .with_priority(obj.attr.priority())
@@ -575,14 +557,13 @@ impl GbEmulator {
                     && obj_pixel.color() > 0
                     && (!obj_pixel.priority() || bg_pixel.color() == 0)
                 {
-                    let (pal, pal_offset) = if obj_pixel.dmg_palette() {
-                        (ppu.obp1, 4)
+                    let pal = if obj_pixel.dmg_palette() {
+                        ppu.obp1
                     } else {
-                        (ppu.obp0, 0)
+                        ppu.obp0
                     };
 
-                    let color_id = pal >> (2 * obj_pixel.color()) & 0x3;
-                    let palette_idx = pal_offset + color_id;
+                    let palette_idx = (pal >> (2 * obj_pixel.color())) & 0x3;
                     self.push_pixel(palette_idx, |p| &p.obj_palettes);
                 } else if ppu.lcdc.bg_wnd_priority() {
                     let palette_idx = (ppu.bgp >> (2 * bg_pixel.color())) & 0x3;
@@ -703,8 +684,6 @@ impl GbEmulator {
     }
 
     pub fn ppu_step(&mut self) {
-        self.update_stat_intr();
-
         let ppu = &mut self.ppu;
         if !ppu.lcdc.lcd_enable() {
             ppu.pixel_idx += 4;
@@ -712,11 +691,14 @@ impl GbEmulator {
                 ppu.pixel_idx = 0;
                 self.output.frame_ready = true;
             } else {
-                self.push_pixel(0, |p| &p.obj_palettes);
+                self.push_pixel(0, |p| &p.bg_palettes);
             }
             return;
         }
 
+        self.update_stat_intr();
+
+        let ppu = &mut self.ppu;
         match ppu.stat.mode() {
             Mode::OAMScan => {
                 self.oam_scan_tick();
@@ -724,15 +706,16 @@ impl GbEmulator {
                 let ppu = &mut self.ppu;
                 ppu.dot += 1;
                 if ppu.dot >= OAM_SCAN_DOTS {
+                    let is_cgb = self.is_cgb();
                     let ppu = &mut self.ppu;
-                    if !self.sys.priority_mode {
+
+                    if !is_cgb {
                         // DMG priority mode
-                        // TODO: not sure why should compare b.idx against a.idx (reversed)
                         ppu.obj_buf
                             .sort_by(|a, b| a.x.cmp(&b.x).then(b.idx.cmp(&a.idx)));
                     } else {
                         // CGB priority mode
-                        ppu.obj_buf.sort_by(|a, b| a.idx.cmp(&b.idx))
+                        ppu.obj_buf.sort_by(|a, b| b.idx.cmp(&a.idx))
                     }
 
                     ppu.obj_pos_x.extend(

@@ -594,9 +594,9 @@ impl GbEmulator {
                         self.ppu.obj_palettes.0[pal_addr as usize] = val;
                     }
 
-                    // BGPI’s “address” field is automatically incremented (wrapping around from 63 back to 0) after each write to this register, even if the write fails due to CRAM being inaccessible
-                    if self.ppu.bgpi.auto_incr() {
-                        self.ppu.bgpi.set_address(pal_addr + 1);
+                    // OBPI’s “address” field is automatically incremented (wrapping around from 63 back to 0) after each write to this register, even if the write fails due to CRAM being inaccessible
+                    if self.ppu.obpi.auto_incr() {
+                        self.ppu.obpi.set_address(pal_addr + 1);
                     }
                 }
             }

@@ -829,6 +829,7 @@ impl GbEmulator {
             self.sys.clock.set_speed(true);
 
             for _ in 0..2050 {
+                self.timer.div = 0;
                 self.tick();
             }
         }
