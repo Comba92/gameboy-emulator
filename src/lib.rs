@@ -388,14 +388,6 @@ impl GbEmulator {
     }
 
     pub fn set_button(&mut self, input: joypad::Input, state: bool) {
-        let mut new_pressed = self.joy.pressed.clone();
-        new_pressed.set_bit(input as u32, state);
-
-        if (new_pressed.left() && new_pressed.right()) || (new_pressed.up() && new_pressed.down()) {
-            // illegal input
-            return;
-        }
-
         let was_down = self.joy.pressed.get_bit(input as u32);
 
         if self.joy.btns_select && input as u8 <= 3 {
@@ -408,7 +400,18 @@ impl GbEmulator {
             }
         }
 
-        self.joy.pressed.set_bit(input as u32, state);
+        let pressed = &mut self.joy.pressed;
+        pressed.set_bit(input as u32, state);
+
+        if pressed.left() && pressed.right() {
+            pressed.clear_left();
+            pressed.clear_right();
+            pressed.set_bit(input as u32, state);
+        } else if pressed.up() && pressed.down() {
+            pressed.clear_up();
+            pressed.clear_down();
+            pressed.set_bit(input as u32, state);
+        }
     }
 
     pub fn clear_buttons(&mut self) {
@@ -544,7 +547,7 @@ mod utils {
     }
     impl Default for AvgResampler {
         fn default() -> Self {
-            Self::new(emu::DMG_CLOCK_RATE as f64, 48000.0)
+            Self::new(emu::DMG_CLOCK_RATE as f64 / 4.0, 48000.0)
         }
     }
 

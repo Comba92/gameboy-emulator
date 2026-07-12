@@ -367,10 +367,6 @@ impl GbEmulator {
 
             0xff0f => self.bus.intf.into_bits(),
 
-            0xff24 => self.apu.vol.into_bits(),
-            0xff25 => self.apu.pan.into_bits(),
-            0xff26 => self.apu.nr52_read(),
-
             0xff10 => self.apu.p1.sweep.into_bits(),
             0xff11 => self.apu.nr11_read(|a| &a.p1),
             0xff12 => self.apu.p1.env.into_bits(),
@@ -379,6 +375,10 @@ impl GbEmulator {
             0xff16 => self.apu.nr11_read(|a| &a.p2),
             0xff17 => self.apu.p2.env.into_bits(),
             0xff19 => self.apu.nr14_read(|a| &a.p2),
+
+            0xff24 => self.apu.vol.into_bits(),
+            0xff25 => self.apu.pan.into_bits(),
+            0xff26 => self.apu.nr52_read(),
 
             0xff40 => self.ppu.lcdc.into_bits(),
             0xff41 => self.ppu.stat.into_bits(),

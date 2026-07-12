@@ -741,7 +741,7 @@ impl GbEmulator {
         self.output.frame_ready = true;
     }
 
-    pub fn ppu_step(&mut self) {
+    pub(crate) fn ppu_step(&mut self) {
         let ppu = &mut self.ppu;
         if !ppu.lcdc.lcd_enable() {
             return;

@@ -94,7 +94,7 @@ impl GbEmulator {
             hdma: Hdma::new(),
             joy: Joypad::new(),
             sys: System::new(is_cgb_model),
-            output: GbOutput::default(),
+            output: GbOutput::new(),
         })
     }
 
@@ -132,6 +132,10 @@ impl GbEmulator {
 
     pub fn audio_queued(&self) -> usize {
         self.output.audiobuf.queued()
+    }
+
+    pub fn get_audio_f32(&mut self, amount: usize) -> (&[f32], Option<&[f32]>) {
+        self.output.audiobuf.take(amount)
     }
 
     pub fn get_tileset_rgba(&self, buf: &mut [u8]) {

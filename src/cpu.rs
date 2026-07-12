@@ -72,7 +72,7 @@ impl CpuSm83 {
 }
 
 impl GbEmulator {
-    pub fn cpu_step(&mut self) {
+    pub(crate) fn cpu_step(&mut self) {
         self.handle_interrupts();
 
         if self.cpu.halted {

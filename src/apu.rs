@@ -25,6 +25,10 @@ pub struct Envelope {
 pub struct Pulse {
     enabled: bool,
     dac_enable: bool,
+
+    sweep_count: u8,
+    sweep_enable: bool,
+    sweep_period: u16,
     pub sweep: Sweep,
 
     vol: u8,
@@ -87,6 +91,17 @@ impl Pulse {
         }
     }
 
+    fn tick_sweep(&mut self) {
+        if !self.sweep_enable { return; }
+
+        if self.sweep_count == 0 {
+            self.sweep_count = if self.sweep.pace() > 0 { self.sweep.pace() } else { 8 };
+
+        } else {
+            self.sweep_count -= 1;
+        }
+    }
+
     fn trigger(&mut self, cond: bool) {
         if !cond {
             return;
@@ -97,7 +112,9 @@ impl Pulse {
         self.div = self.period;
         self.env_count = self.env.sweep_pace();
         self.vol = self.env.vol_initial();
-        // TODO: sweep
+        self.sweep_period = self.period;
+        self.sweep_count = self.sweep.pace();
+        self.sweep_enable = self.sweep.pace() != 0 || self.sweep.step() != 0;
     }
 
     fn digital_output(&self) -> u8 {
@@ -178,52 +195,52 @@ impl Apu {
         // TODO: clear all apu registers
     }
 
-    pub fn nr10_write(&mut self, val: u8, p: fn(&mut Apu) -> &mut Pulse) {
+    pub fn nr10_write(&mut self, val: u8, pulse: fn(&mut Apu) -> &mut Pulse) {
         if self.master_enable {
-            let p = p(self);
+            let p = pulse(self);
             p.sweep = Sweep::from_bits_with_defaults(val);
         }
     }
 
-    pub fn nr11_read(&self, p: fn(&Apu) -> &Pulse) -> u8 {
-        let p = p(self);
+    pub fn nr11_read(&self, pulse: fn(&Apu) -> &Pulse) -> u8 {
+        let p = pulse(self);
         let mut res = 0;
         res |= p.len_initial;
         res |= p.wave_duty << 6;
         res
     }
 
-    pub fn nr11_write(&mut self, val: u8, p: fn(&mut Apu) -> &mut Pulse) {
+    pub fn nr11_write(&mut self, val: u8, pulse: fn(&mut Apu) -> &mut Pulse) {
         if self.master_enable {
-            let p = p(self);
+            let p = pulse(self);
             p.wave_duty = val >> 6;
             p.len_initial = val & 0x3f;
         }
     }
 
-    pub fn nr12_write(&mut self, val: u8, p: fn(&mut Apu) -> &mut Pulse) {
+    pub fn nr12_write(&mut self, val: u8, pulse: fn(&mut Apu) -> &mut Pulse) {
         if self.master_enable {
-            let p = p(self);
+            let p = pulse(self);
             p.env = Envelope::from_bits_with_defaults(val);
             p.dac_enable = val & 0xf8 != 0;
         }
     }
 
-    pub fn nr13_write(&mut self, val: u8, p: fn(&mut Apu) -> &mut Pulse) {
+    pub fn nr13_write(&mut self, val: u8, pulse: fn(&mut Apu) -> &mut Pulse) {
         if self.master_enable {
-            let p = p(self);
+            let p = pulse(self);
             p.period = (p.period & 0xff00) | (val as u16);
         }
     }
 
-    pub fn nr14_read(&self, p: fn(&Apu) -> &Pulse) -> u8 {
-        let p = p(self);
+    pub fn nr14_read(&self, pulse: fn(&Apu) -> &Pulse) -> u8 {
+        let p = pulse(self);
         ((p.len_enable as u8) << 6) | 0xbf
     }
 
-    pub fn nr14_write(&mut self, val: u8, p: fn(&mut Apu) -> &mut Pulse) {
+    pub fn nr14_write(&mut self, val: u8, pulse: fn(&mut Apu) -> &mut Pulse) {
         if self.master_enable {
-            let p = p(self);
+            let p = pulse(self);
             p.period = (p.period & 0x00ff) | ((val as u16 & 0x7) << 8);
             p.len_enable = val & 0x40 != 0;
             let trigger = val & 0x80 != 0;
@@ -238,15 +255,15 @@ impl Apu {
         let p1_right = self.p1.dac_output(self.pan.ch1_right());
         let p2_right = self.p2.dac_output(self.pan.ch2_right());
 
-        let left = (p1_left + p2_left) / 2.0 * (self.vol.left_vol() as f32 + 1.0);
-        let right = (p1_right + p2_right) / 2.0 * (self.vol.right_vol() as f32 + 1.0);
+        let left = (p1_left + p2_left) / 4.0 * (self.vol.left_vol() as f32 + 1.0);
+        let right = (p1_right + p2_right) / 4.0 * (self.vol.right_vol() as f32 + 1.0);
 
         (left, right)
     }
 }
 
 impl GbEmulator {
-    pub fn apu_step(&mut self) {
+    pub(crate) fn apu_step(&mut self) {
         let cycles = self.cpu.mcycles;
         let apu = &mut self.apu;
 
@@ -271,6 +288,7 @@ impl GbEmulator {
 
             if cycles % 8192 == 0 {
                 // tick sweep
+                apu.p1.tick_sweep();
             }
         }
 

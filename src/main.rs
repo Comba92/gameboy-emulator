@@ -5,15 +5,31 @@ use std::{
 };
 
 use sdl2::{
-    controller::{Axis, Button},
-    event::{Event, WindowEvent},
-    keyboard::Keycode,
-    pixels::Color,
-    pixels::PixelFormatEnum,
-    render::ScaleMode,
+    audio::{AudioCallback, AudioSpecDesired}, controller::{Axis, Button}, event::{Event, WindowEvent}, keyboard::Keycode, pixels::{Color, PixelFormatEnum}, render::ScaleMode
 };
 use tomboyemu_core::{emu::GbEmulator, joypad};
 const AXIS_DEAD_ZONE: i16 = 10_000;
+
+struct AudioHandler {
+    emu: Arc<Mutex<GbEmulator>>,
+}
+impl AudioCallback for AudioHandler {
+    type Channel = f32;
+
+    fn callback(&mut self, out: &mut [Self::Channel]) {
+        let mut emu = self.emu.lock().unwrap();
+
+        while emu.audio_queued() < out.len() {
+            emu.step();
+        }
+
+        let (right, left) = emu.get_audio_f32(out.len());
+        out[..right.len()].copy_from_slice(right);
+        if let Some(left) = left {
+            out[right.len()..].copy_from_slice(left);
+        }
+    }
+}
 
 fn arc_mutex<T>(inner: T) -> Arc<Mutex<T>> {
     Arc::new(Mutex::new(inner))
@@ -22,6 +38,7 @@ fn arc_mutex<T>(inner: T) -> Arc<Mutex<T>> {
 fn main() {
     let sdl = sdl2::init().unwrap();
     let video = sdl.video().unwrap();
+    let audio = sdl.audio().unwrap();
     let mut events = sdl.event_pump().unwrap();
     let controller = sdl.game_controller().unwrap();
     let mut controllers = Vec::new();
@@ -36,7 +53,7 @@ fn main() {
 
     let mut canvas = window
         .into_canvas()
-        // .present_vsync()
+        .present_vsync()
         .build()
         .unwrap();
     canvas.set_logical_size(256, 256).unwrap();
@@ -50,7 +67,7 @@ fn main() {
 
     // let mut bios_path = PathBuf::from("utils/cgb_boot.bin");
     let mut bios_path = PathBuf::from("utils/dmg_boot.bin");
-    let mut rom_path = PathBuf::from("../roms/cgb-acid2.gbc");
+    let mut rom_path = PathBuf::from("roms/cgb-acid2.gbc");
 
     // let emu = GbEmulator::load_bios_only(Some(bios)).unwrap();
     // let emu = GbEmulator::load_rom_from_file(&rom_path, Some(bios)).unwrap();
@@ -60,9 +77,18 @@ fn main() {
         // .skip_boot(true)
         .build()
         .unwrap();
-
-    let frame_rate = time::Duration::from_secs_f32(1.0 / 60.0);
     let emu = arc_mutex(emu);
+
+    let spec = AudioSpecDesired {
+        channels: Some(2),
+        freq: Some(48000),
+        samples: Some(1024),
+    };
+    let emu_arc = Arc::clone(&emu);
+    let audiocb = audio.open_playback(None, &spec, move |_| AudioHandler { emu: emu_arc }).unwrap();
+    audiocb.resume();
+
+    // let frame_rate = time::Duration::from_secs_f32(1.0 / 60.0);
 
     'running: loop {
         // let frame_start = timer.ticks64();
@@ -228,8 +254,6 @@ fn main() {
         {
             let mut emu_lock = emu.lock().unwrap();
 
-            emu_lock.step_until_frame_ready();
-
             tex.with_lock(None, |pixels, _| {
                 pixels.copy_from_slice(emu_lock.get_video_rgba());
                 // emu_lock.get_tileset_rgba(pixels);
@@ -241,7 +265,7 @@ fn main() {
         canvas.copy(&tex, None, None).unwrap();
         canvas.present();
 
-        sleep_until_fps(frame_start, frame_rate);
+        // sleep_until_fps(frame_start, frame_rate);
     }
 }
 
