@@ -5,7 +5,12 @@ use std::{
 };
 
 use sdl2::{
-    audio::{AudioCallback, AudioSpecDesired}, controller::{Axis, Button}, event::{Event, WindowEvent}, keyboard::Keycode, pixels::{Color, PixelFormatEnum}, render::ScaleMode
+    audio::{AudioCallback, AudioSpecDesired},
+    controller::{Axis, Button},
+    event::{Event, WindowEvent},
+    keyboard::Keycode,
+    pixels::{Color, PixelFormatEnum},
+    render::ScaleMode,
 };
 use tomboyemu_core::{emu::GbEmulator, joypad};
 const AXIS_DEAD_ZONE: i16 = 10_000;
@@ -51,11 +56,7 @@ fn main() {
         .build()
         .unwrap();
 
-    let mut canvas = window
-        .into_canvas()
-        .present_vsync()
-        .build()
-        .unwrap();
+    let mut canvas = window.into_canvas().present_vsync().build().unwrap();
     canvas.set_logical_size(256, 256).unwrap();
     let texture_creator = canvas.texture_creator();
     let mut tex = texture_creator
@@ -65,9 +66,9 @@ fn main() {
 
     println!("Current dir: {:?}", std::env::current_dir());
 
-    // let mut bios_path = PathBuf::from("utils/cgb_boot.bin");
-    let mut bios_path = PathBuf::from("utils/dmg_boot.bin");
-    let mut rom_path = PathBuf::from("roms/cgb-acid2.gbc");
+    let mut bios_path = PathBuf::from("utils/cgb_boot.bin");
+    // let mut bios_path = PathBuf::from("utils/dmg_boot.bin");
+    let mut rom_path = PathBuf::from("../roms/cgb-acid2.gbc");
 
     // let emu = GbEmulator::load_bios_only(Some(bios)).unwrap();
     // let emu = GbEmulator::load_rom_from_file(&rom_path, Some(bios)).unwrap();
@@ -85,7 +86,9 @@ fn main() {
         samples: Some(1024),
     };
     let emu_arc = Arc::clone(&emu);
-    let audiocb = audio.open_playback(None, &spec, move |_| AudioHandler { emu: emu_arc }).unwrap();
+    let audiocb = audio
+        .open_playback(None, &spec, move |_| AudioHandler { emu: emu_arc })
+        .unwrap();
     audiocb.resume();
 
     // let frame_rate = time::Duration::from_secs_f32(1.0 / 60.0);

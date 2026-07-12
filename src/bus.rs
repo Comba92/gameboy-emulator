@@ -367,18 +367,28 @@ impl GbEmulator {
 
             0xff0f => self.bus.intf.into_bits(),
 
-            0xff10 => self.apu.p1.sweep.into_bits(),
+            0xff10 => self.apu.nr10_read(|a| &a.p1),
             0xff11 => self.apu.nr11_read(|a| &a.p1),
-            0xff12 => self.apu.p1.env.into_bits(),
+            0xff12 => self.apu.nr12_read(|a| &a.p1),
             0xff14 => self.apu.nr14_read(|a| &a.p1),
 
             0xff16 => self.apu.nr11_read(|a| &a.p2),
-            0xff17 => self.apu.p2.env.into_bits(),
+            0xff17 => self.apu.nr12_read(|a| &a.p2),
             0xff19 => self.apu.nr14_read(|a| &a.p2),
+
+            0xff1a => self.apu.nr30_read(),
+            0xff1c => self.apu.nr32_read(),
+            0xff1e => self.apu.nr34_read(),
+
+            0xff21 => self.apu.nr42_read(),
+            0xff22 => self.apu.nr43_read(),
+            0xff23 => self.apu.nr44_read(),
 
             0xff24 => self.apu.vol.into_bits(),
             0xff25 => self.apu.pan.into_bits(),
             0xff26 => self.apu.nr52_read(),
+
+            0xff30..=0xff3f => self.apu.wave_read(addr),
 
             0xff40 => self.ppu.lcdc.into_bits(),
             0xff41 => self.ppu.stat.into_bits(),
@@ -513,6 +523,17 @@ impl GbEmulator {
             0xff18 => self.apu.nr13_write(val, |a| &mut a.p2),
             0xff19 => self.apu.nr14_write(val, |a| &mut a.p2),
 
+            0xff1a => self.apu.nr30_write(val),
+            0xff1b => self.apu.nr31_write(val),
+            0xff1c => self.apu.nr32_write(val),
+            0xff1d => self.apu.nr33_write(val),
+            0xff1e => self.apu.nr34_write(val),
+
+            0xff20 => self.apu.nr41_write(val),
+            0xff21 => self.apu.nr42_write(val),
+            0xff22 => self.apu.nr43_write(val),
+            0xff23 => self.apu.nr44_write(val),
+
             0xff24 => {
                 if self.apu.master_enable {
                     self.apu.vol = apu::Volume::from_bits_with_defaults(val);
@@ -524,6 +545,8 @@ impl GbEmulator {
                 }
             }
             0xff26 => self.apu.nr52_write(val),
+
+            0xff30..=0xff3f => self.apu.wave_write(addr, val),
 
             0xff40 => self.lcdc_write(val),
             0xff41 => {

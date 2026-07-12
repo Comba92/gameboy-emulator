@@ -766,7 +766,7 @@ impl GbEmulator {
                             .sort_by(|a, b| a.x.cmp(&b.x).then(b.idx.cmp(&a.idx)));
                     } else {
                         // CGB priority mode
-                        ppu.obj_buf.sort_by(|a, b| b.idx.cmp(&a.idx))
+                        ppu.obj_buf.sort_by(|a, b| a.idx.cmp(&b.idx))
                     }
 
                     ppu.obj_pos_x.extend(
