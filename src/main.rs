@@ -68,7 +68,7 @@ fn main() {
 
     let mut bios_path = PathBuf::from("utils/cgb_boot.bin");
     // let mut bios_path = PathBuf::from("utils/dmg_boot.bin");
-    let mut rom_path = PathBuf::from("../roms/cgb-acid2.gbc");
+    let mut rom_path = PathBuf::from("roms/cgb-acid2.gbc");
 
     // let emu = GbEmulator::load_bios_only(Some(bios)).unwrap();
     // let emu = GbEmulator::load_rom_from_file(&rom_path, Some(bios)).unwrap();

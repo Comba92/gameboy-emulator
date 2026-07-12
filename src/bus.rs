@@ -534,11 +534,7 @@ impl GbEmulator {
             0xff22 => self.apu.nr43_write(val),
             0xff23 => self.apu.nr44_write(val),
 
-            0xff24 => {
-                if self.apu.master_enable {
-                    self.apu.vol = apu::Volume::from_bits_with_defaults(val);
-                }
-            }
+            0xff24 => self.apu.nr50_write(val),
             0xff25 => {
                 if self.apu.master_enable {
                     self.apu.pan = apu::Panning::from_bits_with_defaults(val);

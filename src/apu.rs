@@ -9,17 +9,82 @@ fn digital_to_analog(sample: u8) -> f32 {
     -(sample as f32 / 7.5) + 1.0
 }
 
+#[derive(Default)]
+struct Length {
+    enable: bool,
+    count: u8,
+    initial: u8,
+}
+impl Length {
+    pub fn tick(&mut self, enabled: &mut bool) {
+        if !self.enable {return;}
+        if self.count == 0 {
+            *enabled = false;
+        } else {
+            self.count -= 1;
+        }
+    }
+
+    pub fn trigger(&mut self, target: u8) {
+        if self.count == 0 {
+            self.count = target - self.initial;
+        }
+    }
+}
+
+#[derive(Default)]
+struct Envelope {
+    flags: EnvFlags,
+    vol: u8,
+    count: u8,
+}
+impl Envelope {
+    pub fn tick(&mut self) {
+        if self.flags.sweep_pace() == 0 {
+            return;
+        }
+
+        if self.count == 0 {
+            self.count = if self.flags.sweep_pace() > 0 {
+                self.flags.sweep_pace()
+            } else {
+                 8
+            };
+
+            if self.flags.direction() && self.vol < 0xf {
+                self.vol += 1;
+            } else if self.vol > 0 {
+                self.vol -= 1;
+            }
+        } else {
+            self.count -= 1;
+        }
+    }
+
+    fn trigger(&mut self) {
+        self.count = self.flags.sweep_pace();
+        self.vol = self.flags.vol_initial();
+    }
+}
+
 trait Channel {
     fn is_enabled(&self) -> bool;
+    fn is_dac_enabled(&self) -> bool;
     fn tick_div(&mut self);
     fn tick_len(&mut self);
     fn trigger(&mut self, cond: bool);
     fn digital_output(&self) -> u8;
-    fn dac_output(&self, panning: bool) -> f32;
+    fn dac_output(&self, panning: bool) -> f32 {
+        if self.is_dac_enabled() && panning {
+            digital_to_analog(self.digital_output())
+        } else {
+            0.0
+        }
+    }
 }
 
 #[bitfield(u8)]
-pub struct Sweep {
+pub struct SweepFlags {
     #[bits(3)]
     step: u8,
     direction: bool,
@@ -29,7 +94,7 @@ pub struct Sweep {
 }
 
 #[bitfield(u8)]
-pub struct Envelope {
+pub struct EnvFlags {
     #[bits(3)]
     sweep_pace: u8,
     direction: bool,
@@ -46,25 +111,24 @@ pub struct Pulse {
     sweep_count: u8,
     sweep_enable: bool,
     sweep_period: u16,
-    sweep: Sweep,
+    sweep: SweepFlags,
 
-    vol: u8,
-    env_count: u8,
+    len: Length,
     env: Envelope,
 
     period: u16,
     div: u16,
     wave_duty: u8,
     wave_pos: u8,
-
-    len_initial: u8,
-    len_enable: bool,
-    len_count: u8,
 }
 impl Channel for Pulse {
     fn is_enabled(&self) -> bool {
         // TODO: cache this
         self.dac_enable && self.enabled
+    }
+
+    fn is_dac_enabled(&self) -> bool {
+        self.dac_enable
     }
 
     fn tick_div(&mut self) {
@@ -77,27 +141,19 @@ impl Channel for Pulse {
     }
 
     fn tick_len(&mut self) {
-        if self.len_enable {
-            if self.len_count == 0 {
-                self.enabled = false;
-            } else {
-                self.len_count -= 1;
-            }
-        }
+        self.len.tick(&mut self.enabled);
     }
 
     fn trigger(&mut self, cond: bool) {
-        if !cond {
+        if !cond || !self.dac_enable {
             return;
         }
 
         self.enabled = true;
-        if self.len_count == 0 {
-            self.len_count = 64 - self.len_initial;
-        }
+        self.len.trigger(64);
         self.div = 2048 - self.period;
-        self.env_count = self.env.sweep_pace();
-        self.vol = self.env.vol_initial();
+        self.env.trigger();
+
         self.sweep_period = self.period;
         self.sweep_count = if self.sweep.pace() > 0 {
             self.sweep.pace()
@@ -112,21 +168,8 @@ impl Channel for Pulse {
     }
 
     fn digital_output(&self) -> u8 {
-        // TODO: cache this
-        if self.is_enabled() {
-            self.vol * Self::TABLE[self.wave_duty as usize][self.wave_pos as usize]
-        } else {
-            0
-        }
-    }
-
-    fn dac_output(&self, panning: bool) -> f32 {
-        // TODO: cache this
-        if self.dac_enable && panning {
-            digital_to_analog(self.digital_output())
-        } else {
-            0.0
-        }
+        // TODO: cache
+        self.env.vol * Self::TABLE[self.wave_duty as usize][self.wave_pos as usize]
     }
 }
 
@@ -139,21 +182,7 @@ impl Pulse {
     ];
 
     fn tick_env(&mut self) {
-        if self.env.sweep_pace() == 0 {
-            return;
-        }
-
-        if self.env_count == 0 {
-            self.env_count = self.env.sweep_pace();
-
-            if self.env.direction() && self.vol < 0xf {
-                self.vol += 1;
-            } else if self.vol > 0 {
-                self.vol -= 1;
-            }
-        } else {
-            self.env_count -= 1;
-        }
+        self.env.tick();
     }
 
     fn update_sweep_period(&mut self) -> u16 {
@@ -198,7 +227,7 @@ impl Pulse {
 }
 
 #[bitfield(u8)]
-struct Randomness {
+struct NoiseFlags {
     #[bits(3)]
     clock_div: u8,
     lsfr_width: bool,
@@ -211,21 +240,20 @@ struct Noise {
     enabled: bool,
     dac_enable: bool,
 
-    len_initial: u8,
-    len_enable: bool,
-    len_count: u8,
-
-    vol: u8,
-    env_count: u8,
+    len: Length,
     env: Envelope,
 
     lfsr: u16,
     div: u8,
-    rnd: Randomness,
+    rnd: NoiseFlags,
 }
 impl Channel for Noise {
     fn is_enabled(&self) -> bool {
         self.enabled && self.dac_enable
+    }
+
+    fn is_dac_enabled(&self) -> bool {
+        self.dac_enable
     }
 
     fn tick_div(&mut self) {
@@ -253,62 +281,31 @@ impl Channel for Noise {
     }
 
     fn tick_len(&mut self) {
-        if self.len_enable {
-            if self.len_count == 0 {
-                self.enabled = false;
-            } else {
-                self.len_count -= 1;
-            }
-        }
+        self.len.tick(&mut self.enabled);
     }
 
     fn trigger(&mut self, cond: bool) {
-        if !cond {
+        if !cond || !self.dac_enable {
             return;
         }
 
         self.enabled = true;
-        if self.len_count == 0 {
-            self.len_count = 64 - self.len_initial;
-        }
-        self.env_count = self.env.sweep_pace();
-        self.vol = self.env.vol_initial();
+        self.len.trigger(64);
+        self.env.trigger();
         self.lfsr = 0x7fff;
     }
 
     fn digital_output(&self) -> u8 {
-        if self.is_enabled() {
-            self.vol * ((self.lfsr & 1) as u8 ^ 1)
+        if self.enabled {
+            self.env.vol * ((self.lfsr & 1) as u8 ^ 1)
         } else {
             0
-        }
-    }
-
-    fn dac_output(&self, panning: bool) -> f32 {
-        if self.dac_enable && panning {
-            digital_to_analog(self.digital_output())
-        } else {
-            0.0
         }
     }
 }
 impl Noise {
     pub fn tick_env(&mut self) {
-        if self.env.sweep_pace() == 0 {
-            return;
-        }
-
-        if self.env_count == 0 {
-            self.env_count = self.env.sweep_pace();
-
-            if self.env.direction() && self.vol < 0xf {
-                self.vol += 1;
-            } else if self.vol > 0 {
-                self.vol -= 1;
-            }
-        } else {
-            self.env_count -= 1;
-        }
+        self.env.tick();
     }
 }
 
@@ -317,9 +314,7 @@ struct Wave {
     enabled: bool,
     dac_enable: bool,
 
-    len_initial: u8,
-    len_count: u16,
-    len_enable: bool,
+    len: Length,
 
     vol: u8,
     vol_initial: u8,
@@ -335,9 +330,13 @@ impl Channel for Wave {
         self.enabled && self.dac_enable
     }
 
+    fn is_dac_enabled(&self) -> bool {
+        self.dac_enable
+    }
+
     fn tick_div(&mut self) {
         if self.div == 0 {
-            self.div = (2048 - self.period);
+            self.div = 2048 - self.period;
             self.sample = self.ram[self.pos as usize / 2];
             self.pos = (self.pos + 1) % 32;
         } else {
@@ -346,48 +345,36 @@ impl Channel for Wave {
     }
 
     fn tick_len(&mut self) {
-        if self.len_enable {
-            if self.len_count == 0 {
-                self.enabled = false;
-            } else {
-                self.len_count -= 1;
-            }
-        }
+        self.len.tick(&mut self.enabled);
     }
 
     fn trigger(&mut self, cond: bool) {
-        if !cond {
+        if !cond || !self.dac_enable {
             return;
         }
 
         self.enabled = true;
-        if self.len_count == 0 {
-            self.len_count = 256 - self.len_initial as u16;
-        }
-        self.div = (2048 - self.period);
+        self.len.trigger(255);
+        self.div = 2048 - self.period;
         self.vol = self.vol_initial;
         self.pos = 0;
     }
 
     fn digital_output(&self) -> u8 {
-        if self.is_enabled() {
+        if self.enabled {
             let sample = if self.pos % 2 == 0 {
                 self.sample >> 4
             } else {
                 self.sample & 0xf
             };
 
-            sample >> (self.vol - 1)
+            if self.vol > 0 {
+                sample >> (self.vol-1)
+            } else {
+                0
+            }
         } else {
             0
-        }
-    }
-
-    fn dac_output(&self, panning: bool) -> f32 {
-        if self.dac_enable && panning {
-            digital_to_analog(self.digital_output())
-        } else {
-            0.0
         }
     }
 }
@@ -408,10 +395,10 @@ pub struct Panning {
 // CAREFUL: volume is actually volume+1 (it is never 0)
 pub struct Volume {
     #[bits(3)]
-    right_vol: u8,
+    vol_right: u8,
     vin_right: bool,
     #[bits(3)]
-    left_vol: u8,
+    vol_left: u8,
     vin_left: bool,
 }
 
@@ -421,6 +408,8 @@ pub struct Apu {
 
     pub pan: Panning,
     pub vol: Volume,
+    vol_left: f32,
+    vol_right: f32,
 
     pub p1: Pulse,
     pub p2: Pulse,
@@ -442,10 +431,19 @@ impl Apu {
         }
     }
 
+    pub fn nr50_write(&mut self, val: u8) {
+        if self.master_enable {
+            self.vol = Volume::from_bits_with_defaults(val);
+            self.vol_left = (self.vol.vol_left() as f32 + 1.0) / 8.0;
+            self.vol_right = (self.vol.vol_right() as f32 + 1.0) / 8.0;
+        }
+    }
+
     pub fn nr52_read(&self) -> u8 {
         let mut res = 0;
         res |= (self.p1.is_enabled() as u8) << 0;
         res |= (self.p2.is_enabled() as u8) << 1;
+        res |= (self.w.is_enabled() as u8) << 2;
         res |= (self.n.is_enabled() as u8) << 3;
         res |= (self.master_enable as u8) << 7;
 
@@ -454,7 +452,10 @@ impl Apu {
 
     pub fn nr52_write(&mut self, val: u8) {
         self.master_enable = val & 0x80 != 0;
-        // TODO: clear all apu registers
+
+        if !self.master_enable {
+            *self = Apu::new();
+        }
     }
 
     pub fn nr10_read(&self, pulse: fn(&Apu) -> &Pulse) -> u8 {
@@ -465,14 +466,14 @@ impl Apu {
     pub fn nr10_write(&mut self, val: u8, pulse: fn(&mut Apu) -> &mut Pulse) {
         if self.master_enable {
             let p = pulse(self);
-            p.sweep = Sweep::from_bits_with_defaults(val);
+            p.sweep = SweepFlags::from_bits_with_defaults(val);
         }
     }
 
     pub fn nr11_read(&self, pulse: fn(&Apu) -> &Pulse) -> u8 {
         let p = pulse(self);
         let mut res = 0;
-        res |= p.len_initial;
+        res |= p.len.initial;
         res |= p.wave_duty << 6;
         res
     }
@@ -481,19 +482,19 @@ impl Apu {
         if self.master_enable {
             let p = pulse(self);
             p.wave_duty = val >> 6;
-            p.len_initial = val & 0x3f;
+            p.len.initial = val & 0x3f;
         }
     }
 
     pub fn nr12_read(&self, pulse: fn(&Apu) -> &Pulse) -> u8 {
         let p = pulse(self);
-        p.env.into_bits()
+        p.env.flags.into_bits()
     }
 
     pub fn nr12_write(&mut self, val: u8, pulse: fn(&mut Apu) -> &mut Pulse) {
         if self.master_enable {
             let p = pulse(self);
-            p.env = Envelope::from_bits_with_defaults(val);
+            p.env.flags = EnvFlags::from_bits_with_defaults(val);
             p.dac_enable = val & 0xf8 != 0;
         }
     }
@@ -507,14 +508,14 @@ impl Apu {
 
     pub fn nr14_read(&self, pulse: fn(&Apu) -> &Pulse) -> u8 {
         let p = pulse(self);
-        ((p.len_enable as u8) << 6) | 0xbf
+        ((p.len.enable as u8) << 6) | 0xbf
     }
 
     pub fn nr14_write(&mut self, val: u8, pulse: fn(&mut Apu) -> &mut Pulse) {
         if self.master_enable {
             let p = pulse(self);
             p.period = (p.period & 0x00ff) | ((val as u16 & 0x7) << 8);
-            p.len_enable = val & 0x40 != 0;
+            p.len.enable = val & 0x40 != 0;
             let trigger = val & 0x80 != 0;
             p.trigger(trigger);
         }
@@ -532,7 +533,7 @@ impl Apu {
 
     pub fn nr31_write(&mut self, val: u8) {
         if self.master_enable {
-            self.w.len_initial = val;
+            self.w.len.initial = val;
         }
     }
 
@@ -553,13 +554,13 @@ impl Apu {
     }
 
     pub fn nr34_read(&self) -> u8 {
-        ((self.w.len_enable as u8) << 6) | 0xbf
+        ((self.w.len.enable as u8) << 6) | 0xbf
     }
 
     pub fn nr34_write(&mut self, val: u8) {
         if self.master_enable {
             self.w.period = (self.w.period & 0x00ff) | ((val as u16 & 0x7) << 8);
-            self.w.len_enable = val & 0x40 != 0;
+            self.w.len.enable = val & 0x40 != 0;
             let trigger = val & 0x80 != 0;
             self.w.trigger(trigger);
         }
@@ -581,17 +582,17 @@ impl Apu {
 
     pub fn nr41_write(&mut self, val: u8) {
         if self.master_enable {
-            self.n.len_initial = val & 0x3f;
+            self.n.len.initial = val & 0x3f;
         }
     }
 
     pub fn nr42_read(&self) -> u8 {
-        self.n.env.into_bits()
+        self.n.env.flags.into_bits()
     }
 
     pub fn nr42_write(&mut self, val: u8) {
         if self.master_enable {
-            self.n.env = Envelope::from_bits_with_defaults(val);
+            self.n.env.flags = EnvFlags::from_bits_with_defaults(val);
             self.n.dac_enable = val & 0xf8 != 0;
         }
     }
@@ -602,17 +603,17 @@ impl Apu {
 
     pub fn nr43_write(&mut self, val: u8) {
         if self.master_enable {
-            self.n.rnd = Randomness::from_bits_with_defaults(val);
+            self.n.rnd = NoiseFlags::from_bits_with_defaults(val);
         }
     }
 
     pub fn nr44_read(&self) -> u8 {
-        ((self.n.len_enable as u8) << 6) | 0xbf
+        ((self.n.len.enable as u8) << 6) | 0xbf
     }
 
     pub fn nr44_write(&mut self, val: u8) {
         if self.master_enable {
-            self.n.len_enable = val & 0x40 != 0;
+            self.n.len.enable = val & 0x40 != 0;
             let trigger = val & 0x80 != 0;
             self.n.trigger(trigger);
         }
@@ -631,9 +632,9 @@ impl Apu {
 
         // TODO CACHE volume
         let left = (p1_left + p2_left + w_left + n_left) / 4.0
-            * ((self.vol.left_vol() as f32 + 1.0) / 8.0);
+            * self.vol_left;
         let right = (p1_right + p2_right + w_right + n_right) / 4.0
-            * ((self.vol.right_vol() as f32 + 1.0) / 8.0);
+            * self.vol_right;
 
         (left, right)
     }
@@ -641,7 +642,10 @@ impl Apu {
 
 impl GbEmulator {
     pub(crate) fn apu_step(&mut self) {
+        if !self.apu.master_enable { return; }
+
         let cycles = self.cpu.mcycles;
+        let div = self.timer.div;
         let apu = &mut self.apu;
 
         // Pulses are clocked at 1048576 Hz
@@ -649,11 +653,14 @@ impl GbEmulator {
         apu.p1.tick_div();
         apu.p2.tick_div();
 
-        // Noise is clocked at 262144Hz
+        // Noise is clocked at 262144 Hz
         // 4194304Hz / 262144Hz = 16Tcycles = 4Mcycle
         // But the period reload does something that makes it clock every 1Mcycle...
         apu.n.tick_div();
         apu.w.tick_div();
+
+        // Frame sequencer: 512 Hz
+        // 4194304Hz / 512Hz = 8192 Tcycles = 2048 Mcycles
 
         // This should be clocked by timer DIV
         if cycles % 2048 == 0 {
