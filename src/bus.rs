@@ -773,7 +773,46 @@ impl GbEmulator {
                 }
             }
 
-            Mbc::Mmm01 => todo!(),
+            Mbc::Mmm01(m) => {
+                match addr {
+                    0x0000..0x2000 => {
+                        self.bus.sram_enable(val & 0x0f == 0x0a);
+                        if m.unmapped {
+                            m.ram_mask = (val >> 4) & 0x3;
+                            if val & 0x40 != 0 {
+                                m.unmapped = true;
+                            }
+                        }
+                    }
+                    0x2000..0x4000 => {
+                        m.rom_bank_lo = val & 0x1f;
+                        if m.unmapped {
+                            m.rom_bank_mid = (val >> 5) & 0x3;
+                        }
+                    }
+                    0x4000..0x6000 => {
+                        m.ram_bank_lo = val & 0x3;
+                        if m.unmapped {
+                            m.ram_bank_hi = (val >> 2) & 0x3;
+                            m.rom_bank_hi = (val >> 4) & 0x3;
+                            m.mode_disable = val & 0x40 != 0;
+                        }
+                    }
+                    0x6000..0x8000 => {
+                        if !m.mode_disable {
+                            m.mode = val & 1 != 0;
+                        }
+
+                        if m.unmapped {
+                            m.rom_mask = (val >> 1) & 0x30;
+                            m.multiplex = val & 0x40 != 0;
+                        }
+                    }
+                    _ => {}
+                }
+
+                m.update(&mut self.bus);
+            }
 
             Mbc::M161(bankswitched) => {
                 if addr >= 0x8000 || *bankswitched {
@@ -837,7 +876,7 @@ pub enum Mbc {
     Mbc5(Mbc5),
     Mbc6,
     Mbc7(Mbc7),
-    Mmm01,
+    Mmm01(Mmm01),
     M161(bool),
     Tama5,
     HuC1,
@@ -864,7 +903,8 @@ impl Mbc {
             }
             0x19..=0x1e => Mbc::Mbc5(Mbc5::default()),
 
-            // 0x0b | 0x0c | 0x0d => Mbc::Mmm01,
+            // 0x0b | 0x0c | 0x0d => Mbc::Mmm01(Mmm01::new(bus)),
+
             // 0x20 => Mbc::Mbc6,
             0x22 => Mbc::Mbc7(Mbc7::default()),
 
@@ -886,7 +926,7 @@ pub(crate) struct Mbc1 {
     ram_bank: u8,
 }
 impl Mbc1 {
-    pub fn new(bus: &mut Bus) -> Self {
+    pub fn new(bus: &Bus) -> Self {
         // detect MBC1M: it has a nintendo logo at bank 0x10
         let bank10_start = ROM_BANK_SIZE * 0x10;
         let logo_start = bank10_start + 0x104;
@@ -916,6 +956,7 @@ impl Mbc1 {
                 .map(((self.ram_bank << 4) | (self.rom_bank & 0x0f)) as u16);
         } else {
             if self.mode {
+                // TODO: ARE YOU SURE ABOUT THIS??
                 bus.rom0_banking.map((self.ram_bank as u16) << 5);
                 bus.sram_banking.map(self.ram_bank as u16);
             } else {
@@ -945,6 +986,73 @@ pub(crate) struct Mbc5 {
 pub(crate) struct Mbc7 {
     ram_enable0: bool,
     ram_enable1: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct Mmm01 {
+    unmapped: bool,
+    multiplex: bool,
+    ram_mask: u8,
+    rom_mask: u8,
+    ram_bank_lo: u8,
+    ram_bank_hi: u8,
+    rom_bank_lo: u8,
+    rom_bank_mid: u8,
+    rom_bank_hi: u8,
+    mode_disable: bool,
+    mode: bool,
+}
+impl Mmm01 {
+    pub fn new(bus: &mut Bus) -> Self {
+        // Mapped to menu program in the last 32 KiB of ROM
+        // TODO: WARNING: what happens to boot rom?
+
+        let banks_count = bus.rom.len() / (16 * 1024);
+        bus.rom0_banking.map(banks_count as u16 - 2);
+        bus.rom1_banking.map(banks_count as u16 - 1);
+
+        Self {
+            unmapped: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn update(&mut self, bus: &mut Bus) {
+        if self.unmapped {
+            return;
+        }
+
+        if self.multiplex {
+            todo!()
+        } else {
+            let rom0 = ((self.rom_bank_hi as u16) << 7)
+                | ((self.rom_bank_mid as u16) << 5)
+                | (self.rom_bank_lo & !self.rom_mask) as u16;
+
+            bus.rom0_banking.map(rom0);
+
+            let rom1_lo = self.rom_bank_lo & !self.rom_mask;
+            let rom1_lo = if rom1_lo == 0 {
+                self.rom_bank_lo | 1
+            } else {
+                self.rom_bank_lo
+            };
+
+            let rom1 = ((self.rom_bank_hi as u16) << 7)
+                | ((self.rom_bank_mid as u16) << 5)
+                | rom1_lo as u16;
+
+            bus.rom1_banking.map(rom1);
+
+            let ram = if self.mode {
+                (self.ram_bank_hi << 2) | self.ram_bank_lo
+            } else {
+                (self.ram_bank_hi << 2) | (self.ram_bank_lo & !self.ram_mask)
+            };
+
+            bus.sram_banking.map(ram as u16);
+        }
+    }
 }
 
 #[derive(Debug)]

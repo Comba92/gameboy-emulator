@@ -71,12 +71,24 @@ impl RomData {
         self.mode == ConsoleMode::CGB_Only
     }
 
-    pub fn parse(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn parse(mut bytes: &[u8]) -> Result<Self, &'static str> {
         if !is_valid_rom(bytes) {
             return Err("invalid GameBoy rom");
         }
 
         let mut header = RomData::default();
+
+        // special case: MMM01 roms have the real header in the last 32Kib of ROM
+        if bytes.len() > 32 * 1024 {
+            let last_bank_start = bytes.len() - 32 * 1024;
+            let logo_start = last_bank_start + 0x104;
+            let logo_end = logo_start + NINTENDO_LOGO.len();
+            let nintendo_logo = &bytes[logo_start..logo_end];
+            if nintendo_logo == NINTENDO_LOGO {
+                bytes = &bytes[last_bank_start..];
+            }
+        }
+
         header.title = bytes[0x134..0x144]
             .iter()
             .take_while(|c| c.is_ascii_graphic() || c.is_ascii_whitespace())
