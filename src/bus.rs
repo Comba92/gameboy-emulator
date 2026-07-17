@@ -596,11 +596,12 @@ impl GbEmulator {
             }
 
             0xff51 => self.hdma.src = (self.hdma.src & 0x00ff) | ((val as u16) << 8),
-            0xff52 => self.hdma.src = (self.hdma.src & 0xff00) | (val as u16 & !0x7),
+            0xff52 => self.hdma.src = (self.hdma.src & 0xff00) | (val as u16 & !0x7), // the lower four bits of the address are ignored (treated as zero).
             0xff53 => {
-                self.hdma.dst = 0x8000 | (self.hdma.dst & 0x00ff) | ((val as u16 & 0x1f) << 8)
+                self.hdma.dst = 0x8000 | (self.hdma.dst & 0x00ff) | ((val as u16 & 0x1f) << 8) //  the upper 3 bits are ignored either (destination is always in VRAM).
+                // destination is always in VRAM!
             }
-            0xff54 => self.hdma.dst = (self.hdma.dst & 0xff00) | (val as u16 & !0x7),
+            0xff54 => self.hdma.dst = (self.hdma.dst & 0xff00) | (val as u16 & !0x7), // the lower four bits of the address are ignored (treated as zero)
             0xff55 => {
                 if self.is_cgb() {
                     self.hdma.write(val);

@@ -16,12 +16,21 @@ struct Length {
     initial: u8,
 }
 impl Length {
+    pub fn new(initial: u8) -> Self {
+        Self {
+            initial,
+            count: 0,
+            enable: false,
+        }
+    }
     pub fn tick(&mut self, enabled: &mut bool) {
-        if !self.enable {return;}
+        if !self.enable || self.count == 0 {
+            return;
+        }
+
+        self.count -= 1;
         if self.count == 0 {
             *enabled = false;
-        } else {
-            self.count -= 1;
         }
     }
 
@@ -32,6 +41,15 @@ impl Length {
     }
 }
 
+#[bitfield(u8)]
+pub struct EnvFlags {
+    #[bits(3)]
+    sweep_pace: u8,
+    direction: bool,
+    #[bits(4)]
+    vol_initial: u8,
+}
+
 #[derive(Default)]
 struct Envelope {
     flags: EnvFlags,
@@ -40,30 +58,31 @@ struct Envelope {
 }
 impl Envelope {
     pub fn tick(&mut self) {
-        if self.flags.sweep_pace() == 0 {
+        if self.flags.sweep_pace() == 0 || self.count == 0 {
             return;
         }
 
+        self.count -= 1;
         if self.count == 0 {
-            self.count = if self.flags.sweep_pace() > 0 {
-                self.flags.sweep_pace()
-            } else {
-                 8
-            };
+            self.count = self.flags.sweep_pace();
 
             if self.flags.direction() && self.vol < 0xf {
                 self.vol += 1;
             } else if self.vol > 0 {
                 self.vol -= 1;
             }
-        } else {
-            self.count -= 1;
         }
     }
 
     fn trigger(&mut self) {
         self.count = self.flags.sweep_pace();
         self.vol = self.flags.vol_initial();
+
+        self.count = if self.flags.sweep_pace() > 0 {
+            self.flags.sweep_pace()
+        } else {
+            8
+        };
     }
 }
 
@@ -91,15 +110,6 @@ pub struct SweepFlags {
     #[bits(3)]
     pace: u8,
     _unused: bool,
-}
-
-#[bitfield(u8)]
-pub struct EnvFlags {
-    #[bits(3)]
-    sweep_pace: u8,
-    direction: bool,
-    #[bits(4)]
-    vol_initial: u8,
 }
 
 #[derive(Default)]
@@ -132,8 +142,12 @@ impl Channel for Pulse {
     }
 
     fn tick_div(&mut self) {
+        if !self.enabled {
+            return;
+        }
+
         if self.div == 0 {
-            self.div = 2048 - self.period;
+            self.div = 4 * (2048 - self.period);
             self.wave_pos = (self.wave_pos + 1) % 8;
         } else {
             self.div -= 1
@@ -151,7 +165,7 @@ impl Channel for Pulse {
 
         self.enabled = true;
         self.len.trigger(64);
-        self.div = 2048 - self.period;
+        self.div = 4 * (2048 - self.period);
         self.env.trigger();
 
         self.sweep_period = self.period;
@@ -181,6 +195,15 @@ impl Pulse {
         [1, 0, 0, 0, 0, 0, 0, 1],
     ];
 
+    pub fn new(has_sweep: bool) -> Self {
+        Self {
+            has_sweep,
+            len: Length::new(64),
+            period: 2 * 2048,
+            ..Default::default()
+        }
+    }
+
     fn tick_env(&mut self) {
         self.env.tick();
     }
@@ -205,6 +228,10 @@ impl Pulse {
     }
 
     fn tick_sweep(&mut self) {
+        if !self.sweep_enable {
+            return;
+        }
+
         if self.sweep_count == 0 {
             self.sweep_count = if self.sweep.pace() > 0 {
                 self.sweep.pace()
@@ -212,7 +239,7 @@ impl Pulse {
                 8
             };
 
-            if self.sweep_enable && self.sweep.pace() > 0 {
+            if self.sweep.pace() > 0 {
                 let period = self.update_sweep_period();
                 if period <= 2047 && self.sweep.step() > 0 {
                     self.sweep_period = period;
@@ -257,7 +284,7 @@ impl Channel for Noise {
     }
 
     fn tick_div(&mut self) {
-        if self.rnd.clock_shift() >= 14 {
+        if !self.enabled || self.rnd.clock_shift() >= 14 {
             return;
         }
 
@@ -292,19 +319,23 @@ impl Channel for Noise {
         self.enabled = true;
         self.len.trigger(64);
         self.env.trigger();
-        self.lfsr = 0x7fff;
+        self.lfsr = 0xffff;
     }
 
     fn digital_output(&self) -> u8 {
-        if self.enabled {
-            self.env.vol * ((self.lfsr & 1) as u8 ^ 1)
-        } else {
-            0
-        }
+        self.env.vol * ((self.lfsr & 1) as u8 ^ 1)
     }
 }
 impl Noise {
-    pub fn tick_env(&mut self) {
+    pub fn new() -> Self {
+        Self {
+            len: Length::new(64),
+            lfsr: 0xffff,
+            ..Default::default()
+        }
+    }
+
+    fn tick_env(&mut self) {
         self.env.tick();
     }
 }
@@ -317,13 +348,22 @@ struct Wave {
     len: Length,
 
     vol: u8,
-    vol_initial: u8,
     div: u16,
     period: u16,
 
     pos: u8,
     sample: u8,
     pub ram: [u8; 16],
+}
+impl Wave {
+    pub fn new() -> Self {
+        Self {
+            len: Length::new(255),
+            period: 2 * 2048,
+            enabled: true, // TODO: why is this the case?
+            ..Default::default()
+        }
+    }
 }
 impl Channel for Wave {
     fn is_enabled(&self) -> bool {
@@ -335,8 +375,12 @@ impl Channel for Wave {
     }
 
     fn tick_div(&mut self) {
+        if !self.enabled {
+            return;
+        }
+
         if self.div == 0 {
-            self.div = 2048 - self.period;
+            self.div = 2 * (2048 - self.period);
             self.sample = self.ram[self.pos as usize / 2];
             self.pos = (self.pos + 1) % 32;
         } else {
@@ -355,24 +399,19 @@ impl Channel for Wave {
 
         self.enabled = true;
         self.len.trigger(255);
-        self.div = 2048 - self.period;
-        self.vol = self.vol_initial;
+        self.div = 2 * (2048 - self.period);
         self.pos = 0;
     }
 
     fn digital_output(&self) -> u8 {
-        if self.enabled {
-            let sample = if self.pos % 2 == 0 {
-                self.sample >> 4
-            } else {
-                self.sample & 0xf
-            };
+        let sample = if self.pos % 2 == 0 {
+            self.sample >> 4
+        } else {
+            self.sample & 0xf
+        };
 
-            if self.vol > 0 {
-                sample >> (self.vol-1)
-            } else {
-                0
-            }
+        if self.vol > 0 {
+            sample >> (self.vol - 1)
         } else {
             0
         }
@@ -410,6 +449,7 @@ pub struct Apu {
     pub vol: Volume,
     vol_left: f32,
     vol_right: f32,
+    frame_count: u8,
 
     pub p1: Pulse,
     pub p2: Pulse,
@@ -419,14 +459,10 @@ pub struct Apu {
 impl Apu {
     pub fn new() -> Self {
         Self {
-            p1: Pulse {
-                has_sweep: true,
-                ..Default::default()
-            },
-            p2: Pulse {
-                has_sweep: false,
-                ..Default::default()
-            },
+            p1: Pulse::new(true),
+            p2: Pulse::new(false),
+            n: Noise::new(),
+            w: Wave::new(),
             ..Default::default()
         }
     }
@@ -538,12 +574,12 @@ impl Apu {
     }
 
     pub fn nr32_read(&mut self) -> u8 {
-        ((self.w.vol_initial as u8) << 5) | 0x9f
+        ((self.w.vol as u8) << 5) | 0x9f
     }
 
     pub fn nr32_write(&mut self, val: u8) {
         if self.master_enable {
-            self.w.vol_initial = (val >> 5) & 0x3;
+            self.w.vol = (val >> 5) & 0x3;
         }
     }
 
@@ -630,11 +666,8 @@ impl Apu {
         let w_right = self.w.dac_output(self.pan.ch3_right());
         let n_right = self.n.dac_output(self.pan.ch4_right());
 
-        // TODO CACHE volume
-        let left = (p1_left + p2_left + w_left + n_left) / 4.0
-            * self.vol_left;
-        let right = (p1_right + p2_right + w_right + n_right) / 4.0
-            * self.vol_right;
+        let left = (p1_left + p2_left + w_left + n_left) / 4.0 * self.vol_left;
+        let right = (p1_right + p2_right + w_right + n_right) / 4.0 * self.vol_right;
 
         (left, right)
     }
@@ -642,11 +675,10 @@ impl Apu {
 
 impl GbEmulator {
     pub(crate) fn apu_step(&mut self) {
-        if !self.apu.master_enable { return; }
-
-        let cycles = self.cpu.mcycles;
-        let div = self.timer.div;
         let apu = &mut self.apu;
+        if !apu.master_enable {
+            return;
+        }
 
         // Pulses are clocked at 1048576 Hz
         // 4194304Hz / 1048576Hz = 4Tcycles = 1Mcycle
@@ -659,36 +691,39 @@ impl GbEmulator {
         apu.n.tick_div();
         apu.w.tick_div();
 
-        // Frame sequencer: 512 Hz
-        // 4194304Hz / 512Hz = 8192 Tcycles = 2048 Mcycles
-
-        // This should be clocked by timer DIV
-        if cycles % 2048 == 0 {
-            if cycles % 16384 == 0 {
-                // tick env
-                apu.p1.tick_env();
-                apu.p2.tick_env();
-                apu.n.tick_env();
-            }
-
-            if cycles % 4096 == 0 {
-                // tick length
-                apu.p1.tick_len();
-                apu.p2.tick_len();
-                apu.w.tick_len();
-                apu.n.tick_len();
-            }
-
-            if cycles % 8192 == 0 {
-                // tick sweep
-                apu.p1.tick_sweep();
-            }
-        }
-
         let (left, right) = apu.mix_channels();
         if let Some((left, right)) = self.output.resampler.add_sample(left, right) {
             self.output.audiobuf.push(left);
             self.output.audiobuf.push(right);
         }
+    }
+
+    pub(crate) fn apu_frame_step(&mut self) {
+        let apu = &mut self.apu;
+        if !apu.master_enable {
+            return;
+        }
+
+        // Frame sequencer: 512 Hz
+        // 4194304Hz / 512Hz = 8192 Tcycles = 2048 Mcycles
+
+        if apu.frame_count % 2 == 0 {
+            apu.p1.tick_len();
+            apu.p2.tick_len();
+            apu.w.tick_len();
+            apu.n.tick_len();
+        }
+
+        if apu.frame_count == 2 || apu.frame_count == 6 {
+            apu.p1.tick_sweep();
+        }
+
+        if apu.frame_count == 7 {
+            apu.p1.tick_env();
+            apu.p2.tick_env();
+            apu.n.tick_env();
+        }
+
+        apu.frame_count = (apu.frame_count + 1) % 8;
     }
 }

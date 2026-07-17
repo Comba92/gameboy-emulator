@@ -73,7 +73,7 @@ pub struct Stat {
     _unused: bool,
 }
 
-#[bitfield(u8)]
+#[bitfield(u16)]
 struct FifoPixel {
     #[bits(2)]
     color: u8,
@@ -81,7 +81,10 @@ struct FifoPixel {
     #[bits(3)]
     cgb_palette: u8,
     priority: bool,
-    _unused: bool,
+    #[bits(6, default = 41)]
+    index: u8,
+    #[bits(3)]
+    _unused: u8,
 }
 
 #[bitfield(u8)]
@@ -351,7 +354,7 @@ impl GbEmulator {
     fn oam_scan_tick(&mut self) {
         let ppu = &mut self.ppu;
 
-        if ppu.dot % 2 == 1 || ppu.obj_buf.len() >= 10 {
+        if ppu.dot % 2 == 1 || ppu.obj_buf.len() > 10 {
             return;
         }
 
@@ -361,7 +364,8 @@ impl GbEmulator {
 
         let y = obj[0];
         if y <= ppu.ly + 16 && ppu.ly + 16 < y + ppu.obj_size() {
-            let obj = Object::new(obj, obj_idx as u8);
+            // let obj = Object::new(obj, obj_idx as u8);
+            let obj = Object::new(obj, ppu.obj_buf.len() as u8);
             ppu.obj_buf.push(obj);
         }
     }
@@ -529,6 +533,8 @@ impl GbEmulator {
     }
 
     fn obj_fetch_tick(&mut self) {
+        let is_cgb = self.is_cgb();
+
         let ppu = &mut self.ppu;
         match ppu.obj_fetch {
             ObjFetcherState::Idle => {}
@@ -556,7 +562,8 @@ impl GbEmulator {
 
                 // if the OAM FIFO doesn’t have at least 8 pixels in it then transparent pixels with the lowest priority are pushed onto the OAM FIFO.
                 while ppu.obj_fifo.len() < 8 {
-                    ppu.obj_fifo.push_back(0.into());
+                    ppu.obj_fifo
+                        .push_back(FifoPixelBuilder::new().with_color(0).with_index(41).build());
                 }
 
                 for i in (0..8).rev() {
@@ -569,11 +576,26 @@ impl GbEmulator {
                         .with_priority(obj.attr.priority())
                         .with_dmg_palette(obj.attr.dmg_palette())
                         .with_cgb_palette(obj.attr.cgb_palette())
+                        .with_index(obj.idx)
                         .build();
 
                     if let Some(old_pixel) = ppu.obj_fifo.get_mut(i) {
                         if old_pixel.color() == 0 {
                             *old_pixel = new_pixel;
+                        } else {
+                            if is_cgb && new_pixel.index() < old_pixel.index() {
+                                *old_pixel = new_pixel;
+                            } else if !is_cgb {
+                                let old_obj = &ppu.obj_buf[old_pixel.index() as usize];
+                                if obj
+                                    .x
+                                    .cmp(&old_obj.x)
+                                    .then(obj.idx.cmp(&old_obj.idx))
+                                    .is_le()
+                                {
+                                    *old_pixel = new_pixel;
+                                }
+                            }
                         }
                     } else {
                         ppu.obj_fifo.push_back(new_pixel);
@@ -725,6 +747,8 @@ impl GbEmulator {
     fn enter_hblank(&mut self) {
         let ppu = &mut self.ppu;
         ppu.stat.set_mode(Mode::HBlank);
+
+        self.hdma.enter_hblank();
     }
 
     fn enter_vblank(&mut self) {
@@ -757,17 +781,17 @@ impl GbEmulator {
                 let ppu = &mut self.ppu;
                 ppu.dot += 1;
                 if ppu.dot >= OAM_SCAN_DOTS {
-                    let is_cgb = self.is_cgb();
+                    // let is_cgb = self.is_cgb();
                     let ppu = &mut self.ppu;
 
-                    if !is_cgb {
-                        // DMG priority mode
-                        ppu.obj_buf
-                            .sort_by(|a, b| a.x.cmp(&b.x).then(b.idx.cmp(&a.idx)));
-                    } else {
-                        // CGB priority mode
-                        ppu.obj_buf.sort_by(|a, b| a.idx.cmp(&b.idx))
-                    }
+                    // if !is_cgb {
+                    //     // DMG priority mode
+                    //     ppu.obj_buf
+                    //         .sort_by(|a, b| a.x.cmp(&b.x).then(b.idx.cmp(&a.idx)));
+                    // } else {
+                    //     // CGB priority mode
+                    //     ppu.obj_buf.sort_by(|a, b| a.idx.cmp(&b.idx))
+                    // }
 
                     ppu.obj_pos_x.extend(
                         ppu.obj_buf

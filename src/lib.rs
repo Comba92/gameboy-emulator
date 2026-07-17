@@ -97,12 +97,21 @@ impl GbEmulator {
         // Div is in reality a 16bit counter, incremented every Mcycle.
         // Only the upper part is visibile, hence why it increases every 256 Tcycles!
         let cycles = self.cpu.mcycles;
+        let double_speed = self.in_double_speed();
 
         let timer = &mut self.timer;
         if cycles % 64 == 0 {
+            let old_div = timer.div;
             timer.div = timer.div.wrapping_add(1);
+
+            let mask = if double_speed { 0x20 } else { 0x10 };
+
+            if timer.div & mask == 0 && old_div & mask > 0 {
+                self.apu_frame_step();
+            }
         }
 
+        let timer = &mut self.timer;
         let tima_inc = match timer.tac.clock_select() {
             timer::Mode::M256 => 256,
             timer::Mode::M4 => 4,
@@ -212,34 +221,47 @@ mod dma {
     pub struct Hdma {
         pub src: u16,
         pub dst: u16,
-        pub read: u8,
-        pub len: u16,
+        pub len: u8, // read
         pub mode: bool,
 
-        count: Option<u8>,
+        pub in_hblank: bool,
+        pub curr: Option<(u16, u16)>,
     }
     impl Hdma {
         pub fn new() -> Self {
             Self {
                 src: 0xffff,
                 dst: 0xffff,
-                read: 0xff,
-                len: 0,
+                len: 0xff,
                 mode: false,
-                count: None,
+                in_hblank: false,
+                curr: None,
             }
         }
 
+        pub fn enter_hblank(&mut self) {
+            self.in_hblank = true;
+        }
+
+        pub fn should_transfer(&self) -> bool {
+            self.curr.is_some() && (!self.mode || self.in_hblank) // we're either in general purpose mode or in hblank
+        }
+
         pub fn read(&self) -> u8 {
-            // ((self.mode as u8) << 7) | self.len
-            self.read
+            let is_transferring = self.curr.is_some();
+            ((!is_transferring as u8) << 7) | self.len
         }
 
         pub fn write(&mut self, val: u8) {
-            self.read = val;
-            self.mode = val & 0x80 != 0;
-            self.len = ((val as u16 & 0x7f) + 1) * 16;
-            self.count = Some(0);
+            if self.curr.is_some() && val & 0x80 == 0 {
+                // cancel transfer
+                self.curr = None;
+            } else {
+                self.len = val & 0x7f; // divided by $10, minus 1
+                self.mode = val & 0x80 != 0;
+                let count = ((self.len as u16) + 1) * 16;
+                self.curr = Some((0, count));
+            }
         }
     }
 }
@@ -255,6 +277,7 @@ impl GbEmulator {
 
                 // let is_cgb = self.is_cgb();
 
+                // TODO: be careful as this breaks everything (what if two dmas while one was still going?)
                 // // disable cpu memory bus
                 // let bus = &mut self.bus;
                 // bus.tmp_map.copy_from_slice(&bus.map);
@@ -296,25 +319,39 @@ impl GbEmulator {
         }
     }
 
-    // pub(crate) fn hdma_step(&mut self) {
-    //     let hdma = &mut self.hdma;
+    pub(crate) fn hdma_step(&mut self) {
+        let hdma = &mut self.hdma;
 
-    //     if let Some(len) = hdma.len {
-    //         if hdma.mode {
-    //             // hblank dma
-    //         } else {
-    //             // general purpose dma
-    //             let val = self.dispatch_read(addr);
-    //             self.dispatch_write(addr, val);
+        if let Some((count, len)) = hdma.curr {
+            // general purpose dma
+            let src_addr = hdma.src | count;
+            let dst_addr = 0x8000 | hdma.dst | count;
 
-    //             if len == 1 {
-    //                 hdma.len = None;
-    //             } else {
-    //                 hdma.len = Some(len - 1);
-    //             }
-    //         }
-    //     }
-    // }
+            let val = self.dispatch_read(src_addr);
+            self.dispatch_write(dst_addr, val);
+
+            self.hdma.curr = if len == 1 {
+                self.hdma.len = 0xff; // a value of $FF indicates that the transfer has completed
+                None
+            } else {
+                Some((count + 1, len - 1))
+            };
+        }
+    }
+
+    pub(crate) fn handle_hdma(&mut self) {
+        if !self.hdma.should_transfer() {
+            return;
+        }
+
+        for _ in 0..16 {
+            self.hdma_step();
+            self.tick();
+        }
+
+        self.hdma.len -= 1;
+        self.hdma.in_hblank = false;
+    }
 }
 
 pub mod joypad {
@@ -547,7 +584,7 @@ mod utils {
     }
     impl Default for AvgResampler {
         fn default() -> Self {
-            Self::new(emu::DMG_CLOCK_RATE as f64 / 4.0, 48000.0)
+            Self::new(emu::DMG_CLOCK_RATE as f64, 48000.0)
         }
     }
 

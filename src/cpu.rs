@@ -80,11 +80,13 @@ impl GbEmulator {
             return;
         }
 
+        self.handle_hdma();
+
         let opcode = self.pc_fetch();
         self.decode_n_execute(opcode);
     }
 
-    pub fn handle_interrupts(&mut self) {
+    pub(crate) fn handle_interrupts(&mut self) {
         let inte = self.bus.inte.into_bits();
         let intf = self.bus.intf.into_bits();
         let ints = (inte & intf) & 0x1f;
@@ -118,21 +120,25 @@ impl GbEmulator {
         }
     }
 
-    fn tick(&mut self) {
+    pub(crate) fn tick(&mut self) {
         self.cpu.mcycles += 1;
 
         self.timer_step();
         self.serial_step();
         self.oam_dma_step();
+
+        self.apu_step();
+        self.apu_step();
+        self.apu_step();
         self.apu_step();
 
         self.ppu_step();
         self.ppu_step();
         // Dots remain the same regardless of whether the CPU is in Double Speed mode, so there are 4 dots per Normal Speed M-cycle, and 2 per Double Speed M-cycle.
-        if !self.in_double_speed() {
-            self.ppu_step();
-            self.ppu_step();
-        }
+        // if !self.in_double_speed() {
+        self.ppu_step();
+        self.ppu_step();
+        // }
     }
 }
 
@@ -826,6 +832,7 @@ impl GbEmulator {
         // TODO not implemented fully
 
         if self.sys.clock.armed() {
+            println!("ENTERING SPEED MODE");
             self.sys.clock.set_armed(false);
             self.sys.clock.set_speed(true);
 
